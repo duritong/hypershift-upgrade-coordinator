@@ -39,7 +39,7 @@ The Hypershift Upgrade Coordinator is a fleet-level orchestration controller tha
     - **Mixed Scheduling Example:** The control plane can be upgraded immediately (CP `StartAt` is empty), but the first NodePool has a `StartAt` timestamp set for Day 2 at night. The control plane upgrades and completes immediately, and the coordinator waits until Day 2 night to trigger the first NodePool. Once the first NodePool is complete, any subsequent NodePools (with empty `StartAt` fields) will upgrade sequentially and immediately.
 11. **Comprehensive NodePool Resolution (Zero-Orphan Architecture):**
     To ensure no NodePool is left permanently paused (`pausedUntil: "true"`), the coordinator always retrieves **all** NodePools associated with the cluster from `<hc_namespace>`, including those omitted from `.spec.nodePools` list in the CR:
-    - **Priority Grouping:** Every NodePool (listed or omitted) is assigned its priority group based on its `upgrade.hypershift.openshift.io/order` label (defaulting to `50` if missing).
+    - **Priority Grouping:** Every NodePool (listed or omitted) is assigned its priority group based on its `upgrade.huc.0xshift.dev/order` label (defaulting to `50` if missing).
     - **Omitted NodePool Fallback:** Any NodePool omitted from the CR's `spec.nodePools` is treated as having an empty/nil `StartAt` timestamp (meaning it will roll out immediately once its priority group becomes active).
     - *Example:* A cluster has `pool-a` (order `10`, scheduled for Day 2) and `pool-b` (order `50`, scheduled for Day 3), and `pool-c` (order `50`, omitted from spec). During preflight, all pools are paused. On Day 2, `pool-a` upgrades. On Day 3, `pool-b` begins its scheduled rollout, and `pool-c` upgrades **in parallel** with it (since `pool-c` has default order `50` and an empty `StartAt`). This guarantees 100% of NodePools are upgraded and unpaused.
 12. **Event-Driven Status Monitoring (Watches & Predicates):**
@@ -110,7 +110,7 @@ The upgrade coordinator operates as a deterministic state machine that continuou
 #### C. Staggered NodePool Orchestration & HCCO Log-Scraping Draining Monitor
 Once the control plane has been 100% verified on the target version, the coordinator begins sequentially rolling out the NodePools:
 
-- **Label-Based Priority Grouping:** The coordinator fetches all associated NodePools and groups them by priority based on their `upgrade.hypershift.openshift.io/order` label (defaulting to `50` if missing).
+- **Label-Based Priority Grouping:** The coordinator fetches all associated NodePools and groups them by priority based on their `upgrade.huc.0xshift.dev/order` label (defaulting to `50` if missing).
 - **Staggered, Scheduled Execution:**
   - The coordinator processes NodePool groups sequentially (lowest order value first).
   - For each NodePool in the active group, the coordinator evaluates its corresponding `StartAt` schedule defined in `spec.nodePools`.

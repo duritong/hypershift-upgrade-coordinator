@@ -172,8 +172,8 @@ func (r *HostedClusterUpgrade) validateUpgradeSpec() error {
 
 		labels := uNP.GetLabels()
 		order := 50 // default SRE priority order
-		if labels != nil && labels["upgrade.hypershift.openshift.io/order"] != "" {
-			if val, err := strconv.Atoi(labels["upgrade.hypershift.openshift.io/order"]); err == nil {
+		if labels != nil && labels["upgrade.huc.0xshift.dev/order"] != "" {
+			if val, err := strconv.Atoi(labels["upgrade.huc.0xshift.dev/order"]); err == nil {
 				order = val
 			}
 		}

@@ -32,7 +32,7 @@ To enforce security and stability across the fleet, a validating admission webho
 - **Outcome:** Reject CR creation or updates if any step represents a downgrade or lateral version change (e.g. attempting to "upgrade" from `4.22.2` to `4.22.2` or `4.21.5`). If issues occur with specific versions during runtime, the SRE's escape hatch is to pause the upgrade coordinator (`pausedUntil: "true"`) and manually intervene in the objects.
 
 ### D. StartAt Label-Order Consistency
-- **Rule:** Validate that the scheduled `StartAt` times for NodePools are logically consistent with their priority groups (determined by the `upgrade.hypershift.openshift.io/order` label on each NodePool). Specifically, for any two NodePools $A$ and $B$:
+- **Rule:** Validate that the scheduled `StartAt` times for NodePools are logically consistent with their priority groups (determined by the `upgrade.huc.0xshift.dev/order` label on each NodePool). Specifically, for any two NodePools $A$ and $B$:
      - If $Order(A) < Order(B)$ (meaning $A$ must upgrade *before* $B$), and both have `StartAt` timestamps defined, then $StartAt(B)$ must be **equal to or later** than $StartAt(A)$. Reject CR updates that violate this temporal order.
 
 ---

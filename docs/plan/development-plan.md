@@ -125,7 +125,7 @@ The development is divided into 6 distinct, sequential milestones.
 ### **Milestone 5: Priority NodePools & HCCO Log Scraping**
 * **Goal:** Implement worker NodePool serialization, concurrency limits, and log-scraping draining monitors.
 * **Deliverables:**
-  - Label-based NodePool sequence priority grouping (`upgrade.hypershift.openshift.io/order`).
+  - Label-based NodePool sequence priority grouping (`upgrade.huc.0xshift.dev/order`).
   - Handling of omitted/orphan NodePools (automatically unpausing and upgrading them under priority `50` with `nil` schedules).
   - Implementation of `spec.rolloutPolicy.maxParallelNodePools` rollout limits.
   - HCCO container log-scraping worker executing inside the controller pod to trace blockages.

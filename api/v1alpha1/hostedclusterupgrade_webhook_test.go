@@ -169,7 +169,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			npA.SetName("pool-a")
 			npA.SetNamespace(nsName)
 			npA.SetLabels(map[string]string{
-				"upgrade.hypershift.openshift.io/order": "10",
+				"upgrade.huc.0xshift.dev/order": "10",
 			})
 			err = k8sClient.Create(context.Background(), npA)
 			Expect(err).NotTo(HaveOccurred())
@@ -188,7 +188,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			npB.SetName("pool-b")
 			npB.SetNamespace(nsName)
 			npB.SetLabels(map[string]string{
-				"upgrade.hypershift.openshift.io/order": "20",
+				"upgrade.huc.0xshift.dev/order": "20",
 			})
 			err = k8sClient.Create(context.Background(), npB)
 			Expect(err).NotTo(HaveOccurred())
