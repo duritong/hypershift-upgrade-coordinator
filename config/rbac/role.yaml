@@ -5,6 +5,14 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - controlplane.hypershift.openshift.io
+  resources:
+  - controlplanecomponents
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - upgrade.0xshift.dev
   resources:
   - hostedclusterupgrades

@@ -1,0 +1,35 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: controlplanecomponents.controlplane.hypershift.openshift.io
+spec:
+  group: controlplane.hypershift.openshift.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            status:
+              type: object
+              properties:
+                version:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      message:
+                        type: string
+  scope: Namespaced
+  names:
+    plural: controlplanecomponents
+    singular: controlplanecomponent
+    kind: ControlPlaneComponent
