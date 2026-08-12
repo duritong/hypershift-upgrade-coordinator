@@ -1,2 +1,3 @@
 resources:
 - manager.yaml
+- network_policy.yaml

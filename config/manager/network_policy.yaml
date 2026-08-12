@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-manager-netpol
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # 1. Allow Webhooks (TCP 9443)
+  - ports:
+    - protocol: TCP
+      port: 9443
+  # 2. Allow Prometheus scraping (TCP 8443) from OpenShift monitoring namespaces
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          network.openshift.io/policy-group: monitoring
+    ports:
+    - protocol: TCP
+      port: 8443
+  # 3. Allow Liveness/Readiness probes (TCP 8081)
+  - ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  # Allow egress to communicate with the API server, dynamically resolved namespaces, and CoreDNS
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443
+  # Allow egress to other pods in the cluster (e.g. HCCO pods in control-plane namespaces)
+  - to:
+    - namespaceSelector: {}

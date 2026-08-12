@@ -1,0 +1,264 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Fleet Upgrade State Summary",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 6)",
+          "legendFormat": "Completed",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "title": "Total Active Upgrades",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 3 or hypershift_upgrade_phase == 4)",
+          "legendFormat": "Active Upgrades",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "title": "Active Upgrade Fleet Transition Matrix",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
+          "legendFormat": "Phase",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
+          "legendFormat": "Overall Duration",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_step_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
+          "legendFormat": "Step Duration",
+          "range": true,
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 4,
+      "title": "Active Upgrades Live Duration vs Step Duration",
+      "type": "bargauge",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"} > 0",
+          "legendFormat": "{{name}} (Overall)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_step_duration_seconds{step=\"ControlPlane\", current_version=~\"$current_version\", target_version=~\"$target_version\"} > 0",
+          "legendFormat": "{{name}} (CP Step)",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 5,
+      "title": "Control Plane Component Rollout Statuses",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_controlplane_component_ready{component!=\"\"}",
+          "legendFormat": "{{component}} ready status",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 6,
+      "title": "NodePool Upgrade Rollout Ratio Curve",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_nodepool_rollout_ratio{current_version=~\"$current_version\", target_version=~\"$target_version\"} * 100",
+          "legendFormat": "{{nodepool}} rollout %",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["hypershift", "operator", "sre"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(hypershift_upgrade_phase, current_version)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "current_version",
+        "query": {
+          "query": "label_values(hypershift_upgrade_phase, current_version)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(hypershift_upgrade_phase, target_version)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "target_version",
+        "query": {
+          "query": "label_values(hypershift_upgrade_phase, target_version)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "title": "HyperShift Upgrade Coordinator SRE Dashboard",
+  "uid": "huc-sre-dashboard",
+  "version": 1
+}

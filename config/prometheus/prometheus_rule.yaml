@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: hypershift-upgrade-coordinator-alerts
+  namespace: system
+spec:
+  groups:
+  - name: hypershift-upgrade-coordinator.alerts
+    rules:
+    - alert: HypershiftUpgradeCoordinatorBlocked
+      expr: hypershift_upgrade_phase == 7
+      for: 15m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Hosted Cluster Upgrade is Blocked"
+        description: "The HostedClusterUpgrade '{{ $labels.name }}' in namespace '{{ $labels.namespace }}' is currently in Blocked phase."
+    - alert: HypershiftUpgradeCoordinatorNodePoolStuck
+      expr: hypershift_upgrade_nodepool_blocked == 1
+      for: 30m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Hosted Cluster Upgrade NodePool is Blocked"
+        description: "The NodePool '{{ $labels.nodepool }}' in HostedClusterUpgrade '{{ $labels.name }}' has stalled and is blocked by PDBs or failed drains."
+    - alert: HypershiftUpgradeStepDurationLong
+      expr: hypershift_upgrade_step_duration_seconds > 14400
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Hosted Cluster Upgrade step took too long"
+        description: "The upgrade step '{{ $labels.step }}' for HostedClusterUpgrade '{{ $labels.name }}' has been active for more than 4 hours."
