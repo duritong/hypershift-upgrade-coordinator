@@ -12,33 +12,42 @@ The Hypershift Upgrade Coordinator is a fleet-level orchestration controller tha
 1. **Orchestration, Not Actuation:** The coordinator does not perform low-level upgrades. It manages the lifecycle of `HostedCluster` and `NodePool` resources by updating their specs (e.g., `release.image` and `pausedUntil`) and observing their status conditions.
 2. **Reconciliation-Driven State Detection:** On every reconciliation loop, the coordinator must assess the actual state of the cluster (regardless of whether it was recently restarted, paused, or manually modified) and determine the appropriate step to execute or resume.
 3. **Safety Verification Gates (with Expected Version):** Transitioning from one step to another requires exhaustive verification. A control plane or NodePool upgrade is not complete when `.status.conditions` update; the coordinator must explicitly verify that the reported active version matches the **expected target version** (to prevent false positives from previously ready components) and that all `ControlPlaneComponent` (CPC) resources are `Available=True` and `RolloutComplete=True`.
-4. **Targeted Pausing via `pausedUntil`:** The coordinator leverages HyperShift's built-in `pausedUntil` field on `HostedCluster` and `NodePool` resources to halt reconciliation by the main HyperShift operator when necessary, allowing sequential, controlled, and scheduled rollouts.
-5. **Optional EUS (Extended Update Support) Multi-Hop Upgrades:** 
+4. **Pre-Step Health Re-verification:** Preflight checks are not executed solely on Day 0. To protect clusters during multi-stage rollouts, **the coordinator re-runs the entire preflight health-verification checks immediately before initiating any transition** (such as unpausing a NodePool, shifting from intermediate to target versions, or resuming after a scheduled pause). If the cluster is found degraded or failing at any step transition, the state machine halts, transitions to `Blocked` or `Failing`, and sounds an alarm. This is a critical testing scenario.
+5. **Targeted Pausing via `pausedUntil` (With Continuous Observability):** The coordinator leverages HyperShift's built-in `pausedUntil` field on `HostedCluster` and `NodePool` resources to halt reconciliation by the main HyperShift operator when necessary, allowing sequential, controlled, and scheduled rollouts.
+   - *Technical Nuance:* In upstream HyperShift, **status reconciliation is executed before the pause check is evaluated**. This means that setting `pausedUntil: "true"` on a NodePool halts spec mutations, but the NodePool controller **continues to reconcile and update its `.status` block** (including node counts, versions, and conditions) in real-time. This provides full read-only observability of paused objects.
+6. **Optional EUS (Extended Update Support) Multi-Hop Upgrades:** 
    - **Multi-Hop Path:** If `IntermediateReleaseImages` is populated (jumping from an even minor to an even minor release, e.g., 4.20.x to 4.22.y), the coordinator routes the control plane through the specified intermediate release (4.21.z) while keeping NodePools paused. Once the control plane reaches the final version, NodePools are upgraded directly from their initial version to the final target version.
    - **Standard/Direct Path:** If `IntermediateReleaseImages` is omitted or empty (representing minor upgrades like 4.21.m to 4.22.n, or patch releases like 4.20.a to 4.20.b), the coordinator bypasses any intermediate state and directly upgrades the control plane to the `TargetReleaseImage` in a single step.
-6. **Strict Pullspec Formatting & Monotonic Upgrades:**
+7. **Strict Pullspec Formatting & Monotonic Upgrades:**
    To guarantee platform stability and prevent catastrophic downsizes/downgrades (which are completely unsupported in OpenShift), the coordinator enforces strict formatting and version progression rules:
    - **Format Validation:** Every pullspec must match `registry.domain.com/repo/image:<version>-<arch>@sha256:<64-character-hex-digest>`. This allows the operator to safely extract the target OpenShift version and target architecture directly from the tag.
    - **Strict Semver Progression:** Upgrades must strictly jump to **higher versions only**. The controller and webhook parse the SemVer portion of the tags and assert that:
      $$\text{Current Cluster Version} < \text{Intermediate}[0] < \text{Intermediate}[1] \dots < \text{Target Version}$$
-     If any segment of the upgrade path represents a downgrade or a lateral shift (same version), the webhook rejects the CR, and the controller's preflight gate blocks reconciliation.
-7. **Coaligned Naming Convention (No Cluster Reference):** To eliminate redundant configuration and enforce a direct 1:1 relation, a `HostedClusterUpgrade` CR **must share the exact same name** as the target `HostedCluster` in its namespace. A validating admission webhook ensures this constraint and prevents orphan coordinators.
-8. **Least Privilege & Multi-Namespace Isolation (No Cluster-Wide Admin Roles):**
-   To strictly secure enterprise management clusters, the coordinator operates **without any cluster-wide permissions** (no global `ClusterRoleBindings` for resources).
+     If any segment of the upgrade path represents a downgrade or a lateral shift (same version), the webhook rejects the CR, and the controller's preflight gate blocks reconciliation. In case of issues requiring manual repair or overrides, the SRE escape hatch is to pause the coordinator (`spec.pausedUntil: "true"`) and directly adjust the objects.
+8. **Coaligned Naming Convention (No Cluster Reference):** To eliminate redundant configuration and enforce a direct 1:1 relation, a `HostedClusterUpgrade` CR **must share the exact same name** as the target `HostedCluster` in its namespace. A validating admission webhook ensures this constraint and prevents orphan coordinators.
+9. **Least Privilege & Multi-Namespace Isolation (SRE GitOps RBAC Model):**
+   To strictly secure enterprise management clusters, the coordinator operates **without any cluster-wide permissions** (no global read/write ClusterRoleBindings).
    - **Target Namespace Flag:** The operator takes a `--hosted-cluster-namespace` flag (defaulting to `clusters`) to specify which namespace it manages.
    - **Dynamic CP Namespace Resolution:** When coordinating a cluster named `<cluster_name>` located in the hosted cluster namespace `<hc_namespace>`, the coordinator expects its control plane components to reside in `<hc_namespace>-<cluster_name>`.
-   - **Delegated RoleBindings:** It is the responsibility of the operator/admin to wire up local `RoleBindings` in both `<hc_namespace>` and individual `<hc_namespace>-<cluster_name>` namespaces, linking the coordinator's `ServiceAccount` to standard read/write permissions for `HostedClusters`/`NodePools` and read-only permissions for `ControlPlaneComponents` and pod logs.
-   - **Multi-Tenancy:** Multiple independent upgrade coordinators can run concurrently on the same management cluster, each managing a separate target namespace with absolute tenant-to-tenant RBAC isolation.
-9. **Disruption-Aware Scheduling & Sequential Rollouts:**
-   SREs can configure upgrades to execute either as immediate sequential steps, as staggered scheduled steps, or as a mixture of both:
-   - **Omitted `StartAt` (Immediate Fallback):** If `StartAt` is omitted or `nil` on any step, the state machine treats the scheduling check as "always satisfied" and immediately proceeds once its prior dependencies are verified.
-   - **Mixed Scheduling Example:** The control plane can be upgraded immediately (CP `StartAt` is empty), but the first NodePool has a `StartAt` timestamp set for Day 2 at night. The control plane upgrades and completes immediately, and the coordinator waits until Day 2 night to trigger the first NodePool. Once the first NodePool is complete, any subsequent NodePools (with empty `StartAt` fields) will upgrade sequentially and immediately.
-10. **Event-Driven Status Monitoring (Watches & Predicates):**
-   To maintain optimal performance, low latency, and token efficiency, the coordinator **must not poll or list** `ControlPlaneComponent` (CPC) resources. Instead, it registers a **Watch** for `ControlPlaneComponent` objects within the control plane namespace `<hc_namespace>-<cluster_name>`, mapping status updates back to the parent `HostedClusterUpgrade` resource (re-keying to the parent CR which shares the same name as the cluster). The controller uses status-modification `Predicates` to filter out non-status updates (e.g. metadata/annotation changes), ensuring reconciles only fire on actual component transitions.
-11. **Robust Testing Mandates:** The codebase must be backed by an exhaustive testing suite:
-   - **Unit Tests:** Rigorously mock state combinations to verify all possible state-machine transitions, edge cases, and unexpected failures.
-   - **Integration Tests:** Test the coordinator controller with `envtest` against simulated `HostedCluster`, `HostedControlPlane`, `NodePool`, and `ControlPlaneComponent` CRs.
-   - **End-to-End (E2E) Tests:** Full workflow test suite executing a complete EUS upgrade cycle in a real/simulated environment, verifying metrics and alert conditions.
+   - **GitOps-Integrated RBAC Scoping:**
+     - The coordinator has a single local `RoleBinding` in the `clusters` namespace mapping it to a `ClusterRole` granting permission to read/write `HostedClusters` and `NodePools`.
+     - In each individual `<hc_namespace>-<cluster_name>` control plane namespace, SREs include a local `RoleBinding` inside their cluster GitOps template folder. This binds the coordinator's `ServiceAccount` to a read-only `ClusterRole` granting access to read `ControlPlaneComponent` status and HCCO pod logs/events.
+     - This delivers absolute tenant security isolation with zero cluster-admin permissions and negligible GitOps templating overhead.
+10. **Disruption-Aware Scheduling & Sequential Rollouts:**
+    SREs can configure upgrades to execute either as immediate sequential steps, as staggered scheduled steps, or as a mixture of both:
+    - **Omitted `StartAt` (Immediate Fallback):** If `StartAt` is omitted or `nil` on any step, the state machine treats the scheduling check as "always satisfied" and immediately proceeds once its prior dependencies are verified.
+    - **Mixed Scheduling Example:** The control plane can be upgraded immediately (CP `StartAt` is empty), but the first NodePool has a `StartAt` timestamp set for Day 2 at night. The control plane upgrades and completes immediately, and the coordinator waits until Day 2 night to trigger the first NodePool. Once the first NodePool is complete, any subsequent NodePools (with empty `StartAt` fields) will upgrade sequentially and immediately.
+11. **Comprehensive NodePool Resolution (Zero-Orphan Architecture):**
+    To ensure no NodePool is left permanently paused (`pausedUntil: "true"`), the coordinator always retrieves **all** NodePools associated with the cluster from `<hc_namespace>`, including those omitted from `.spec.nodePools` list in the CR:
+    - **Priority Grouping:** Every NodePool (listed or omitted) is assigned its priority group based on its `upgrade.hypershift.openshift.io/order` label (defaulting to `50` if missing).
+    - **Omitted NodePool Fallback:** Any NodePool omitted from the CR's `spec.nodePools` is treated as having an empty/nil `StartAt` timestamp (meaning it will roll out immediately once its priority group becomes active).
+    - *Example:* A cluster has `pool-a` (order `10`, scheduled for Day 2) and `pool-b` (order `50`, scheduled for Day 3), and `pool-c` (order `50`, omitted from spec). During preflight, all pools are paused. On Day 2, `pool-a` upgrades. On Day 3, `pool-b` begins its scheduled rollout, and `pool-c` upgrades **in parallel** with it (since `pool-c` has default order `50` and an empty `StartAt`). This guarantees 100% of NodePools are upgraded and unpaused.
+12. **Event-Driven Status Monitoring (Watches & Predicates):**
+    To maintain optimal performance, low latency, and token efficiency, the coordinator **must not poll or list** `ControlPlaneComponent` (CPC) resources. Instead, it registers a **Watch** for `ControlPlaneComponent` objects within the control plane namespace `<hc_namespace>-<cluster_name>`, mapping status updates back to the parent `HostedClusterUpgrade` resource (re-keying to the parent CR which shares the same name as the cluster). The controller uses status-modification `Predicates` to filter out non-status updates (e.g. metadata/annotation changes), ensuring reconciles only fire on actual component transitions.
+13. **Robust Testing Mandates:** The codebase must be backed by an exhaustive testing suite:
+    - **Unit Tests:** Rigorously mock state combinations to verify all possible state-machine transitions, edge cases, and unexpected failures.
+    - **Integration Tests:** Test the coordinator controller with `envtest` against simulated `HostedCluster`, `HostedControlPlane`, `NodePool`, and `ControlPlaneComponent` CRs.
+    - **End-to-End (E2E) Tests:** Full workflow test suite executing a complete EUS upgrade cycle in a real/simulated environment, verifying metrics and alert conditions.
 
 ---
 
@@ -98,7 +107,7 @@ The upgrade coordinator operates as a deterministic state machine that continuou
   3. Once intermediate step is verified, or if no intermediate image was defined, the coordinator sets `HostedCluster.spec.release.image` to the `TargetReleaseImage`.
   4. The coordinator waits for the target control plane upgrade to reach `TargetReleaseImage` and stabilize.
 
-#### C. Staggered NodePool Orchestration & Scheduling Gates
+#### C. Staggered NodePool Orchestration & HCCO Log-Scraping Draining Monitor
 Once the control plane has been 100% verified on the target version, the coordinator begins sequentially rolling out the NodePools:
 
 - **Label-Based Priority Grouping:** The coordinator fetches all associated NodePools and groups them by priority based on their `upgrade.hypershift.openshift.io/order` label (defaulting to `50` if missing).
@@ -108,8 +117,16 @@ Once the control plane has been 100% verified on the target version, the coordin
   - **The Waiting Gate:** If a NodePool's `StartAt` is defined and the current time is *before* it, the coordinator pauses rollout for that specific NodePool, sets its status to `"Scheduled"`, and continuously reports the step readiness in `.status.message` (e.g., `"Control plane upgraded. NodePool 'worker-pool-1' is scheduled to upgrade on 2026-08-13T02:00:00Z (in 14 hours)"`).
   - **Immediate Fallback:** If `StartAt` is omitted or `nil`, the waiting gate is bypassed immediately.
   - **The Upgrade Gate:** Once any scheduled times are met or bypassed, the coordinator unpauses the NodePool (`spec.pausedUntil: "false"`), sets its release image to the target version, and monitors the rollout.
-  - **Parallelism Constraints:** NodePools within the same group whose scheduled times are open or empty can upgrade in parallel, limited by `.spec.nodePools.concurrency`.
-- **Draining Observation:** During the rollout, the coordinator compares updated node counts and monitors HCCO logs/events to detect stuck drains.
+  - **Parallelism Constraints:** NodePools within the same group whose scheduled times are open or empty can upgrade in parallel, limited by `.spec.rolloutPolicy.maxParallelNodePools` (defaulting to 1).
+- **Log-Scraping Draining Observation:**
+  * **The Challenge:** Upstream HyperShift's HCCO node drainer controller (`hosted-cluster-config-operator/controllers/drainer/drainer.go`) **does not emit Kubernetes Events** during node drains or evictions. It relies strictly on internal container logging.
+  * **The Solution:** To monitor draining and surface stuck nodes, the coordinator implements a targeted **log-scraping worker**:
+    1. When a NodePool rollout begins and a node is marked for draining, the coordinator initiates a log-streaming channel to the `hosted-cluster-config-operator` pod in the control plane namespace `<hc_namespace>-<cluster_name>`.
+    2. It scrapes logs searching for HCCO patterns:
+       - `"Performing drain on node <node_name>"` (logs drain start).
+       - `"failed to drain node <node_name>"` (logs retry requeues).
+       - Pod Disruption Budgets (PDB) or Pod eviction failure warnings (e.g., `"cannot evict pod <pod_name> due to PDB <pdb_name>"`).
+    3. The coordinator parses these lines and immediately surfaces any blocked drainers and the specific blocking pods in `status.nodePoolStatuses[].blockers` and raises `hypershift_upgrade_nodepool_blocked` metric to `1`.
 
 ---
 

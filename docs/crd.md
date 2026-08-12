@@ -29,7 +29,7 @@ To enforce security and stability across the fleet, a validating admission webho
   1. The first intermediate version (if any) is strictly **greater than** the current cluster version.
   2. Each subsequent intermediate version is strictly **greater than** the previous intermediate version.
   3. The target version is strictly **greater than** the final intermediate version (or the current cluster version if no intermediates are defined).
-- **Outcome:** Reject CR creation or updates if any step represents a downgrade or lateral version change (e.g. attempting to "upgrade" from `4.22.2` to `4.22.2` or `4.21.5`).
+- **Outcome:** Reject CR creation or updates if any step represents a downgrade or lateral version change (e.g. attempting to "upgrade" from `4.22.2` to `4.22.2` or `4.21.5`). If issues occur with specific versions during runtime, the SRE's escape hatch is to pause the upgrade coordinator (`pausedUntil: "true"`) and manually intervene in the objects.
 
 ### D. StartAt Label-Order Consistency
 - **Rule:** Validate that the scheduled `StartAt` times for NodePools are logically consistent with their priority groups (determined by the `upgrade.hypershift.openshift.io/order` label on each NodePool). Specifically, for any two NodePools $A$ and $B$:
@@ -86,6 +86,10 @@ type HostedClusterUpgradeSpec struct {
 	// low-traffic maintenance windows.
 	// +required
 	NodePools []NodePoolUpgradeSpec `json:"nodePools"`
+
+	// RolloutPolicy defines global constraints on the upgrade execution.
+	// +optional
+	RolloutPolicy *RolloutPolicySpec `json:"rolloutPolicy,omitempty"`
 }
 
 type ControlPlaneUpgradeSpec struct {
@@ -106,6 +110,15 @@ type NodePoolUpgradeSpec struct {
 	//   2. The control plane upgrade has been fully completed and verified.
 	// +optional
 	StartAt *metav1.Time `json:"startAt,omitempty"`
+}
+
+type RolloutPolicySpec struct {
+	// MaxParallelNodePools specifies the maximum number of NodePools that can be
+	// upgraded in parallel within the same priority group.
+	// Defaults to 1.
+	// +optional
+	// +kubebuilder:default=1
+	MaxParallelNodePools int32 `json:"maxParallelNodePools,omitempty"`
 }
 
 // HostedClusterUpgradeStatus defines the observed state of HostedClusterUpgrade
