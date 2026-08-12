@@ -69,7 +69,7 @@ spec:
     path: clusters/production-cluster-01
   destination:
     server: 'https://kubernetes.default.svc'
-    namespace: default
+    namespace: clusters
   syncPolicy:
     automated:
       prune: true
@@ -103,7 +103,7 @@ apiVersion: hypershift.openshift.io/v1beta1
 kind: HostedCluster
 metadata:
   name: production-cluster-01
-  namespace: default
+  namespace: clusters
 spec:
   # Initial version bootstrap (ArgoCD will sync this on creation, but ignore any subsequent coordinator updates)
   release:
@@ -117,7 +117,7 @@ apiVersion: hypershift.openshift.io/v1beta1
 kind: NodePool
 metadata:
   name: workers-us-east-1a
-  namespace: default
+  namespace: clusters
   labels:
     upgrade.huc.0xshift.dev/order: "10" # Priority Order Group 10
 spec:
@@ -132,7 +132,7 @@ apiVersion: hypershift.openshift.io/v1beta1
 kind: NodePool
 metadata:
   name: workers-us-east-1b
-  namespace: default
+  namespace: clusters
   labels:
     upgrade.huc.0xshift.dev/order: "20" # Priority Order Group 20
 spec:
@@ -150,7 +150,7 @@ apiVersion: upgrade.0xshift.dev/v1alpha1
 kind: HostedClusterUpgrade
 metadata:
   name: production-cluster-01       # MUST match target cluster name
-  namespace: default                # MUST match target cluster namespace
+  namespace: clusters               # MUST match target cluster namespace
 spec:
   # Desired target version tag + digest
   targetReleaseImage: quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c70fca183e380c6121a1c847806f11e839482123277235a8579db472b9ccf2

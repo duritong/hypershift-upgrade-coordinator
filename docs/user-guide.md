@@ -83,7 +83,7 @@ apiVersion: upgrade.0xshift.dev/v1alpha1
 kind: HostedClusterUpgrade
 metadata:
   name: production-cluster-01       # MUST match target HostedCluster name
-  namespace: default                # MUST match target HostedCluster namespace
+  namespace: clusters               # MUST match target HostedCluster namespace
 spec:
   # Target Release Image to upgrade the cluster to (Tag + SHA Digest are mandatory)
   targetReleaseImage: quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c70fca183e380c6121a1c847806f11e839482123277235a8579db472b9ccf2

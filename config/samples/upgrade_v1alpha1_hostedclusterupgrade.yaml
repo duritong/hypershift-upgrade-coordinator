@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: huc
   name: production-cluster-01
-  namespace: default
+  namespace: clusters
 spec:
   # The targeted final OpenShift version (Mandatory Tag + SHA Digest)
   targetReleaseImage: quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c70fca183e380c6121a1c847806f11e839482123277235a8579db472b9ccf2
