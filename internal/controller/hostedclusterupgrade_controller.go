@@ -143,6 +143,13 @@ var (
 		},
 		[]string{"namespace", "name", "nodepool"},
 	)
+	metricAggregatedNodeRolloutRatio = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "hypershift_upgrade_aggregated_node_rollout_ratio",
+			Help: "Overall ratio of upgraded worker nodes (summed across all NodePools) to total desired worker nodes in the cluster.",
+		},
+		[]string{"namespace", "name"},
+	)
 )
 
 func init() {
@@ -155,6 +162,7 @@ func init() {
 		metricComponentReady,
 		metricNodePoolBlocked,
 		metricNodePoolRolloutRatio,
+		metricAggregatedNodeRolloutRatio,
 	)
 }
 
@@ -543,6 +551,12 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		Updated: updatedReplicasSum,
 		Ready:   readyReplicasSum,
 	}
+
+	var aggRatio float64 = 0.0
+	if totalReplicasSum > 0 {
+		aggRatio = float64(updatedReplicasSum) / float64(totalReplicasSum)
+	}
+	metricAggregatedNodeRolloutRatio.WithLabelValues(hcu.Namespace, hcu.Name).Set(aggRatio)
 
 	// 3. Cluster NodePools by label order priority (defaulting to 50 if missing)
 	type npContext struct {

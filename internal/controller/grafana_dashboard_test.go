@@ -92,6 +92,7 @@ var _ = Describe("Grafana Dashboard Validation", func() {
 			"Active Upgrades Live Duration vs Step Duration",
 			"Control Plane Component Rollout Statuses",
 			"NodePool Upgrade Rollout Ratio Curve",
+			"Aggregated Cluster Node Rollout Curve",
 		}
 
 		foundPanels := make(map[string]bool)
@@ -115,6 +116,7 @@ var _ = Describe("Grafana Dashboard Validation", func() {
 			"hypershift_upgrade_step_duration_seconds",
 			"hypershift_upgrade_controlplane_component_ready",
 			"hypershift_upgrade_nodepool_rollout_ratio",
+			"hypershift_upgrade_aggregated_node_rollout_ratio",
 		}
 
 		combinedExprs := strings.Join(allExpressions, " ")

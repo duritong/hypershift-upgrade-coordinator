@@ -203,6 +203,31 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 7,
+      "title": "Aggregated Cluster Node Rollout Curve",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_aggregated_node_rollout_ratio * 100",
+          "legendFormat": "{{name}} overall rollout %",
+          "range": true,
+          "refId": "A"
+        }
+      ]
     }
   ],
   "schemaVersion": 38,
