@@ -1,7 +1,16 @@
-G*.md
+# Local LLM Assistant Memory file
+GEMINI.md
 
-# checked out source code for assistance
+# SDK binary files
+operator-sdk
+.operator-sdk
+
+# Checked out source code reference directory
 tmp/
+
+# Binaries and compiled outputs (Standard Go/K8s)
+bin/
+cover.out
 
 # Ignore swap files
 *.swp
