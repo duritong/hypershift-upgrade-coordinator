@@ -204,6 +204,6 @@ If a worker NodePool rollout stalls, the coordinator automatically scrapes the l
         - name: workers-us-east-1a
           phase: Upgrading
           blockers:
-            - "cannot evict pod 'my-app-pod' in namespace 'app' due to PDB 'my-app-pdb'"
+            - "failed to drain node 'ip-10-0-142-3.ec2.internal': cannot evict pod 'my-app-pod' in namespace 'app' due to PDB 'my-app-pdb'"
     ```
 3.  **Resolve blockages**: Temporarily scale down or bypass the offending PDBs/deployments inside the guest cluster to allow the node drainer to proceed smoothly.

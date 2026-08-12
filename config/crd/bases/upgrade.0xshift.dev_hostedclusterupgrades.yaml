@@ -19,6 +19,14 @@ spec:
       jsonPath: .status.phase
       name: Phase
       type: string
+    - description: Total worker nodes updated
+      jsonPath: .status.aggregatedNodeStatus.updated
+      name: Nodes-Updated
+      type: integer
+    - description: Total worker nodes in cluster
+      jsonPath: .status.aggregatedNodeStatus.total
+      name: Nodes-Total
+      type: integer
     - description: Target OpenShift release image
       jsonPath: .spec.targetReleaseImage
       name: Target-Image
@@ -137,6 +145,29 @@ spec:
             description: HostedClusterUpgradeStatus defines the observed state of
               HostedClusterUpgrade
             properties:
+              aggregatedNodeStatus:
+                description: AggregatedNodeStatus summarizes overall node upgrades
+                  progress across all associated NodePools.
+                properties:
+                  ready:
+                    description: Ready is the number of nodes that are running and
+                      healthy.
+                    format: int32
+                    type: integer
+                  total:
+                    description: Total is the desired replica count.
+                    format: int32
+                    type: integer
+                  updated:
+                    description: Updated is the number of nodes running the target
+                      release version.
+                    format: int32
+                    type: integer
+                required:
+                - ready
+                - total
+                - updated
+                type: object
               completionTime:
                 description: CompletionTime is the time when the upgrade successfully
                   completed.

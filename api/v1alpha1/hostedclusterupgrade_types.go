@@ -121,6 +121,10 @@ type HostedClusterUpgradeStatus struct {
 
 	// NodePoolStatus details the progress of each associated NodePool.
 	NodePoolStatuses []NodePoolUpgradeStatus `json:"nodePoolStatuses,omitempty"`
+
+	// AggregatedNodeStatus summarizes overall node upgrades progress across all associated NodePools.
+	// +optional
+	AggregatedNodeStatus NodeStatusSummary `json:"aggregatedNodeStatus,omitempty"`
 }
 
 type UpgradePhase string
@@ -211,6 +215,8 @@ type NodeStatusSummary struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the upgrade state machine"
+//+kubebuilder:printcolumn:name="Nodes-Updated",type="integer",JSONPath=".status.aggregatedNodeStatus.updated",description="Total worker nodes updated"
+//+kubebuilder:printcolumn:name="Nodes-Total",type="integer",JSONPath=".status.aggregatedNodeStatus.total",description="Total worker nodes in cluster"
 //+kubebuilder:printcolumn:name="Target-Image",type="string",JSONPath=".spec.targetReleaseImage",description="Target OpenShift release image"
 //+kubebuilder:printcolumn:name="Status-Message",type="string",JSONPath=".status.message",description="Current status message"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

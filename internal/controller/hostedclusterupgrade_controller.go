@@ -523,6 +523,27 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		return false, 0, nil
 	}
 
+	// Calculate and assign root-level AggregatedNodeStatus
+	var totalReplicasSum int32
+	var updatedReplicasSum int32
+	var readyReplicasSum int32
+
+	for _, np := range clusterNodePools {
+		replicas, _, _ := unstructured.NestedInt64(np.Object, "status", "replicas")
+		updatedReplicas, _, _ := unstructured.NestedInt64(np.Object, "status", "updatedReplicas")
+		readyReplicas, _, _ := unstructured.NestedInt64(np.Object, "status", "readyReplicas")
+
+		totalReplicasSum += int32(replicas)
+		updatedReplicasSum += int32(updatedReplicas)
+		readyReplicasSum += int32(readyReplicas)
+	}
+
+	hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{
+		Total:   totalReplicasSum,
+		Updated: updatedReplicasSum,
+		Ready:   readyReplicasSum,
+	}
+
 	// 3. Cluster NodePools by label order priority (defaulting to 50 if missing)
 	type npContext struct {
 		object      unstructured.Unstructured
