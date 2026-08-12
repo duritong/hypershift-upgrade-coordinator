@@ -112,14 +112,14 @@ The upgrade coordinator operates as a deterministic state machine that continuou
 #### C. Staggered NodePool Orchestration & HCCO Log-Scraping Draining Monitor
 Once the control plane has been 100% verified on the target version, the coordinator begins sequentially rolling out the NodePools:
 
-- **Label-Based Priority Grouping:** The coordinator fetches all associated NodePools and groups them by priority based on their `upgrade.huc.0xshift.dev/order` label (defaulting to `50` if missing).
+- **Group-Based Rollouts:** The coordinator fetches all associated NodePools and maps them to logical groups based on the label `upgrade.huc.0xshift.dev/group: <group-name>` (defaulting to the `"default"` group if missing).
 - **Staggered, Scheduled Execution:**
-  - The coordinator processes NodePool groups sequentially (lowest order value first).
-  - For each NodePool in the active group, the coordinator evaluates its corresponding `StartAt` schedule defined in `spec.nodePools`.
-  - **The Waiting Gate:** If a NodePool's `StartAt` is defined and the current time is *before* it, the coordinator pauses rollout for that specific NodePool, sets its status to `"Scheduled"`, and continuously reports the step readiness in `.status.message` (e.g., `"Control plane upgraded. NodePool 'worker-pool-1' is scheduled to upgrade on 2026-08-13T02:00:00Z (in 14 hours)"`).
+  - The coordinator processes NodePool groups sequentially in the exact ordered sequence defined in `spec.nodePoolGroups`. Any un-labeled NodePools belong to `"default"`, which is automatically appended to the end of the sequence if omitted from the spec list.
+  - For each group in the sequence, the coordinator evaluates its corresponding `StartAt` schedule defined in `spec.nodePoolGroups[]`.
+  - **The Waiting Gate:** If a group's `StartAt` is defined and the current time is *before* it, the coordinator pauses rollout for that group, sets its NodePools status to `"Scheduled"`, and continuously reports the step readiness in `.status.message` (e.g., `"Control plane upgraded. NodePoolGroup 'compute' is scheduled to upgrade on 2026-08-13T02:00:00Z (in 14 hours)"`).
   - **Immediate Fallback:** If `StartAt` is omitted or `nil`, the waiting gate is bypassed immediately.
-  - **The Upgrade Gate:** Once any scheduled times are met or bypassed, the coordinator unpauses the NodePool (`spec.pausedUntil: "false"`), sets its release image to the target version, and monitors the rollout.
-  - **Parallelism Constraints:** NodePools within the same group whose scheduled times are open or empty can upgrade in parallel, limited by `.spec.rolloutPolicy.maxParallelNodePools` (defaulting to 1).
+  - **The Upgrade Gate:** Once any scheduled times are met or bypassed, the coordinator unpauses the group's NodePools (`spec.pausedUntil: "false"`), sets their release image to the target version, and monitors the rollout.
+  - **Parallelism Constraints:** NodePools within the same active group whose scheduled times are open or empty can upgrade in parallel, limited by `.spec.rolloutPolicy.maxParallelNodePools` (defaulting to 1). Subsequent groups remain in `"WaitingForGroup"` status until the current group finishes completely.
 - **Log-Scraping Draining Observation:**
   * **The Challenge:** Upstream HyperShift's HCCO node drainer controller (`hosted-cluster-config-operator/controllers/drainer/drainer.go`) **does not emit Kubernetes Events** during node drains or evictions. It relies strictly on internal container logging.
   * **The Solution:** To monitor draining and surface stuck nodes, the coordinator implements a targeted **log-scraping worker**:

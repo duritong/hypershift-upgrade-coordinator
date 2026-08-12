@@ -26,7 +26,6 @@ import (
 
 	"golang.org/x/mod/semver"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -182,71 +181,20 @@ func (r *HostedClusterUpgrade) validateUpgradeSpec() error {
 		}
 	}
 
-	// 5. NodePool Priority Order & StartAt Chronological Consistency Check
-	type npInfo struct {
-		name    string
-		order   int
-		startAt *metav1.Time
-	}
+	// 5. NodePool Group-Level Chronological Consistency Check
+	for i := 0; i < len(r.Spec.NodePoolGroups); i++ {
+		for j := i + 1; j < len(r.Spec.NodePoolGroups); j++ {
+			grpA := r.Spec.NodePoolGroups[i]
+			grpB := r.Spec.NodePoolGroups[j]
 
-	nodePoolInfos := make([]npInfo, len(r.Spec.NodePools))
-
-	for i, npSpec := range r.Spec.NodePools {
-		uNP := &unstructured.Unstructured{}
-		uNP.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "hypershift.openshift.io",
-			Version: "v1beta1",
-			Kind:    "NodePool",
-		})
-
-		// Retrieve each declared NodePool CR to fetch its order priority label
-		err := webhookClient.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: npSpec.Name}, uNP)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("declared NodePool '%s' does not exist in namespace '%s'", npSpec.Name, r.Namespace)
-			}
-			return fmt.Errorf("failed to verify NodePool '%s': %v", npSpec.Name, err)
-		}
-
-		labels := uNP.GetLabels()
-		order := 50 // default SRE priority order
-		if labels != nil && labels["upgrade.huc.0xshift.dev/order"] != "" {
-			if val, err := strconv.Atoi(labels["upgrade.huc.0xshift.dev/order"]); err == nil {
-				order = val
-			}
-		}
-
-		nodePoolInfos[i] = npInfo{
-			name:    npSpec.Name,
-			order:   order,
-			startAt: npSpec.StartAt,
-		}
-	}
-
-	// Perform temporal/chronological checks between any two declared NodePools
-	for i := 0; i < len(nodePoolInfos); i++ {
-		for j := i + 1; j < len(nodePoolInfos); j++ {
-			npA := nodePoolInfos[i]
-			npB := nodePoolInfos[j]
-
-			// Skip if either has no scheduled StartAt time
-			if npA.startAt == nil || npB.startAt == nil {
+			if grpA.StartAt == nil || grpB.StartAt == nil {
 				continue
 			}
 
-			// If NodePool A has lower label priority order than NodePool B (A must upgrade first),
-			// then B's StartAt schedule cannot be earlier than A's StartAt schedule.
-			if npA.order < npB.order && npB.startAt.Before(npA.startAt) {
-				return fmt.Errorf("temporal schedule inconsistency: NodePool '%s' (order %d) is scheduled to upgrade at '%s', which is earlier than priority-higher NodePool '%s' (order %d) scheduled at '%s'",
-					npB.name, npB.order, npB.startAt.Time.Format(time.RFC3339),
-					npA.name, npA.order, npA.startAt.Time.Format(time.RFC3339))
-			}
-
-			// Reverse check: If NodePool B has lower label priority order than NodePool A
-			if npB.order < npA.order && npA.startAt.Before(npB.startAt) {
-				return fmt.Errorf("temporal schedule inconsistency: NodePool '%s' (order %d) is scheduled to upgrade at '%s', which is earlier than priority-higher NodePool '%s' (order %d) scheduled at '%s'",
-					npA.name, npA.order, npA.startAt.Time.Format(time.RFC3339),
-					npB.name, npB.order, npB.startAt.Time.Format(time.RFC3339))
+			if grpB.StartAt.Before(grpA.StartAt) {
+				return fmt.Errorf("temporal schedule inconsistency: NodePoolGroup '%s' (position %d) is scheduled to upgrade at '%s', which is earlier than priority-higher group '%s' (position %d) scheduled at '%s'",
+					grpB.Name, j, grpB.StartAt.Time.Format(time.RFC3339),
+					grpA.Name, i, grpA.StartAt.Time.Format(time.RFC3339))
 			}
 		}
 	}

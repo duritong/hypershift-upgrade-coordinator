@@ -50,12 +50,10 @@ type HostedClusterUpgradeSpec struct {
 	// +required
 	ControlPlane ControlPlaneUpgradeSpec `json:"controlPlane"`
 
-	// NodePools lists the scheduling and rollout configurations for worker NodePools.
-	// Because NodePool upgrades require machine drains/reboots and are highly disruptive,
-	// SREs schedule individual NodePools to execute sequentially during distinct,
-	// low-traffic maintenance windows.
+	// NodePoolGroups lists the sequential rollout groups and their maintenance window start schedules.
+	// First groups in this list upgrade first. Un-labeled NodePools belong to the "default" group.
 	// +required
-	NodePools []NodePoolUpgradeSpec `json:"nodePools"`
+	NodePoolGroups []NodePoolGroupSpec `json:"nodePoolGroups"`
 
 	// RolloutPolicy defines global constraints on the upgrade execution.
 	// +optional
@@ -69,14 +67,14 @@ type ControlPlaneUpgradeSpec struct {
 	StartAt *metav1.Time `json:"startAt,omitempty"`
 }
 
-type NodePoolUpgradeSpec struct {
-	// Name specifies the exact name of the target NodePool CR to be upgraded.
+type NodePoolGroupSpec struct {
+	// Name specifies the exact name of the NodePool group (defined by label upgrade.huc.0xshift.dev/group on individual NodePools).
 	// +required
 	Name string `json:"name"`
 
-	// StartAt is an RFC3339 timestamp indicating the earliest time this specific NodePool upgrade may begin.
-	// If omitted or nil, the NodePool upgrade begins immediately once:
-	//   1. Its priority group (defined by labels) becomes active.
+	// StartAt is an RFC3339 timestamp indicating the earliest time this specific NodePool group upgrade may begin.
+	// If omitted or nil, the NodePool group upgrade begins immediately once:
+	//   1. Its position in the ordered list is active (all prior groups completed).
 	//   2. The control plane upgrade has been fully completed and verified.
 	// +optional
 	StartAt *metav1.Time `json:"startAt,omitempty"`
@@ -186,14 +184,17 @@ type NodePoolUpgradeStatus struct {
 	// Name of the NodePool.
 	Name string `json:"name"`
 
+	// Group specifies the logical rollout group this NodePool is assigned to (defined by label upgrade.huc.0xshift.dev/group).
+	Group string `json:"group"`
+
 	// TargetReleaseImage is the release image currently being applied to this NodePool.
 	TargetReleaseImage string `json:"targetReleaseImage"`
 
-	// ScheduledStart indicates when this NodePool is scheduled to begin upgrading (copied from spec.nodePools[].startAt).
+	// ScheduledStart indicates when this NodePool's group is scheduled to begin upgrading (copied from spec.nodePoolGroups[].startAt).
 	ScheduledStart *metav1.Time `json:"scheduledStart,omitempty"`
 
 	// Phase is the current state of this specific NodePool upgrade.
-	// Supported states: "Scheduled", "WaitingForControlPlane", "Upgrading", "Completed", "Blocked"
+	// Supported states: "Scheduled", "WaitingForGroup", "Upgrading", "Completed", "Blocked"
 	Phase string `json:"phase"`
 
 	// Nodes contains node-level metrics for the NodePool rollout.

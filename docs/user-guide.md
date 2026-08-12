@@ -50,23 +50,23 @@ oc get pods -n hypershift-upgrade-coordinator
 
 ---
 
-## 4. Configuring NodePool Priorities
+## 4. Configuring NodePool Groups
 
-Before triggering an upgrade, label your NodePools to define their serialized upgrade sequence. Lower order numbers are upgraded first. NodePools sharing the same order number are upgraded concurrently up to your specified parallelism limit.
+Before triggering an upgrade, assign your NodePools to logical rollout groups. The sequence of group upgrades is defined explicitly in the upgrade CR, eliminating scheduling conflicts.
 
 ### Example Label Commands:
-Label your critical infrastructure pools to upgrade first (e.g., order `10`):
+Label your critical infrastructure pools to upgrade first (e.g., group `infra`):
 ```bash
-oc label nodepool infra-pool -n default upgrade.huc.0xshift.dev/order=10
+oc label nodepool infra-pool -n clusters upgrade.huc.0xshift.dev/group=infra
 ```
 
-Label your general compute worker pools to upgrade next (e.g., order `50`):
+Label your general compute worker pools to upgrade next (e.g., group `compute`):
 ```bash
-oc label nodepool workers-us-east-1a -n default upgrade.huc.0xshift.dev/order=50
-oc label nodepool workers-us-east-1b -n default upgrade.huc.0xshift.dev/order=50
+oc label nodepool workers-us-east-1a -n clusters upgrade.huc.0xshift.dev/group=compute
+oc label nodepool workers-us-east-1b -n clusters upgrade.huc.0xshift.dev/group=compute
 ```
 
-*Note: If a NodePool lacks an upgrade order label, it defaults to order `50` automatically.*
+*Note: If a NodePool lacks an upgrade group label, it defaults to the group `"default"`. If `"default"` is not explicitly defined in your upgrade spec, the coordinator automatically appends it to the very end of the execution sequence, upgrading un-labeled NodePools last.*
 
 ---
 
@@ -99,14 +99,13 @@ spec:
   rolloutPolicy:
     maxParallelNodePools: 2         # Up to 2 NodePools upgrading in parallel per priority group
 
-  # Chronological start windows for specific NodePools
-  nodePools:
-    - name: infra-pool
+  # Ordered rollout sequence: first group in the list upgrades first!
+  nodePoolGroups:
+    - name: infra
       startAt: "2026-08-15T04:00:00Z"
-    - name: workers-us-east-1a
+    - name: compute
       startAt: "2026-08-15T05:00:00Z"
-    - name: workers-us-east-1b
-      startAt: "2026-08-15T05:00:00Z"
+```
 ```
 
 Apply the upgrade CR to trigger the automation:
@@ -158,7 +157,7 @@ The coordinator does not rely on simple high-level conditions to assume the cont
 3.  **Complete Readiness Gate**: Verification only succeeds when **all** active control plane components simultaneously report both `Available` and `RolloutComplete` on the expected target version. Only then is the control plane verified and worker NodePool upgrades initiated.
 
 ### E. Upgrading NodePools (`UpgradingNodePools` Phase)
-Unpauses and upgrades worker NodePools in sequential order based on label priorities, respecting individual `startAt` schedules and the concurrency policy.
+Unpauses and upgrades worker NodePools in sequential order based on spec-ordered groups, respecting group `startAt` schedules and global concurrency limits.
 
 ### F. Completed (`Completed` Phase)
 Sets the final status once all Hosted Control Plane components and worker NodePools are fully verified on the target version.
@@ -173,19 +172,19 @@ You can pause the entire upgrade coordinator at any time. This halts all state t
 #### Option A: Indefinite Pause
 Set `spec.pausedUntil: "true"` on your upgrade resource:
 ```bash
-oc patch hostedclusterupgrade production-cluster-01 -n default --type=merge -p '{"spec":{"pausedUntil":"true"}}'
+oc patch hostedclusterupgrade production-cluster-01 -n clusters --type=merge -p '{"spec":{"pausedUntil":"true"}}'
 ```
 
 #### Option B: Scheduled Pause (Maintenance Hold)
 Set `spec.pausedUntil` to a future RFC3339 timestamp. The operator will remain paused until that time is reached, after which it will resume automatically:
 ```bash
-oc patch hostedclusterupgrade production-cluster-01 -n default --type=merge -p '{"spec":{"pausedUntil":"2026-08-16T12:00:00Z"}}'
+oc patch hostedclusterupgrade production-cluster-01 -n clusters --type=merge -p '{"spec":{"pausedUntil":"2026-08-16T12:00:00Z"}}'
 ```
 
 #### How to Resume
 Set `spec.pausedUntil: "false"` (or remove the field) to resume coordinator operations:
 ```bash
-oc patch hostedclusterupgrade production-cluster-01 -n default --type=merge -p '{"spec":{"pausedUntil":"false"}}'
+oc patch hostedclusterupgrade production-cluster-01 -n clusters --type=merge -p '{"spec":{"pausedUntil":"false"}}'
 ```
 
 ---
@@ -195,7 +194,7 @@ If a worker NodePool rollout stalls, the coordinator automatically scrapes the l
 
 1.  **Check CR status**: View detailed blocker reasons, stuck PDB names, or eviction errors directly inside the status:
     ```bash
-    oc get hostedclusterupgrade production-cluster-01 -n default -o yaml
+    oc get hostedclusterupgrade production-cluster-01 -n clusters -o yaml
     ```
 2.  **Inspect the NodePool blockers section**:
     ```yaml

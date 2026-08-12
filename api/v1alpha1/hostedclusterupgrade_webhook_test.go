@@ -64,7 +64,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				},
 				Spec: HostedClusterUpgradeSpec{
 					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:          []NodePoolUpgradeSpec{},
+					NodePoolGroups:     []NodePoolGroupSpec{},
 					ControlPlane:       ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -107,7 +107,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				},
 				Spec: HostedClusterUpgradeSpec{
 					TargetReleaseImage: "quay.io/ocp:4.20.40-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:          []NodePoolUpgradeSpec{},
+					NodePoolGroups:     []NodePoolGroupSpec{},
 					ControlPlane:       ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -125,7 +125,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				Spec: HostedClusterUpgradeSpec{
 					TargetReleaseImage:       "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:                []NodePoolUpgradeSpec{},
+					NodePoolGroups:           []NodePoolGroupSpec{},
 					ControlPlane:             ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -144,7 +144,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				},
 				Spec: HostedClusterUpgradeSpec{
 					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:          []NodePoolUpgradeSpec{},
+					NodePoolGroups:     []NodePoolGroupSpec{},
 					ControlPlane:       ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -162,7 +162,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				Spec: HostedClusterUpgradeSpec{
 					TargetReleaseImage:       "quay.io/ocp:4.23.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:                []NodePoolUpgradeSpec{},
+					NodePoolGroups:           []NodePoolGroupSpec{},
 					ControlPlane:             ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -172,7 +172,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			Expect(err.Error()).To(ContainSubstring("is more than 1 minor version ahead of intermediate version"))
 		})
 
-		It("should reject conflicting NodePool scheduled times based on label priority", func() {
+		It("should reject conflicting NodePoolGroup scheduled times based on ordered list position", func() {
 			clusterName := "sched-cluster"
 
 			// Create target HostedCluster
@@ -192,45 +192,6 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 				_ = k8sClient.Delete(context.Background(), hc)
 			}()
 
-			// Create NodePool A (order label: "10")
-			npA := &unstructured.Unstructured{}
-			npA.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "hypershift.openshift.io",
-				Version: "v1beta1",
-				Kind:    "NodePool",
-			})
-			npA.SetName("pool-a")
-			npA.SetNamespace(nsName)
-			npA.SetLabels(map[string]string{
-				"upgrade.huc.0xshift.dev/order": "10",
-			})
-			err = k8sClient.Create(context.Background(), npA)
-			Expect(err).NotTo(HaveOccurred())
-
-			defer func() {
-				_ = k8sClient.Delete(context.Background(), npA)
-			}()
-
-			// Create NodePool B (order label: "20")
-			npB := &unstructured.Unstructured{}
-			npB.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "hypershift.openshift.io",
-				Version: "v1beta1",
-				Kind:    "NodePool",
-			})
-			npB.SetName("pool-b")
-			npB.SetNamespace(nsName)
-			npB.SetLabels(map[string]string{
-				"upgrade.huc.0xshift.dev/order": "20",
-			})
-			err = k8sClient.Create(context.Background(), npB)
-			Expect(err).NotTo(HaveOccurred())
-
-			defer func() {
-				_ = k8sClient.Delete(context.Background(), npB)
-			}()
-
-			// Try to apply HCU where pool-b (order 20) is scheduled BEFORE pool-a (order 10)
 			timeNow := metav1.Now()
 			timeLater := metav1.NewTime(timeNow.Add(1 * time.Hour))
 
@@ -243,14 +204,14 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 					TargetReleaseImage:       "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 					ControlPlane:             ControlPlaneUpgradeSpec{},
-					NodePools: []NodePoolUpgradeSpec{
+					NodePoolGroups: []NodePoolGroupSpec{
 						{
-							Name:    "pool-a",
+							Name:    "infra",
 							StartAt: &timeLater, // Scheduled later
 						},
 						{
-							Name:    "pool-b",
-							StartAt: &timeNow, // Scheduled earlier (violates order label: 20 should be >= 10)
+							Name:    "compute",
+							StartAt: &timeNow, // Scheduled earlier (violates ordered list sequence: compute comes AFTER infra, so compute.StartAt must be >= infra.StartAt)
 						},
 					},
 				},

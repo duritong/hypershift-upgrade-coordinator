@@ -88,7 +88,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
 					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:          []upgradev1alpha1.NodePoolUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 				},
 			}
@@ -163,7 +163,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
 					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					NodePools:          []upgradev1alpha1.NodePoolUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					PausedUntil:        &pausedVal,
 				},
@@ -266,7 +266,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npA.SetName("pool-a")
 			npA.SetNamespace(namespace)
 			npA.SetLabels(map[string]string{
-				"upgrade.huc.0xshift.dev/order": "10",
+				"upgrade.huc.0xshift.dev/group": "infra",
 			})
 			_ = unstructured.SetNestedField(npA.Object, clusterName, "spec", "clusterName")
 			_ = unstructured.SetNestedField(npA.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
@@ -285,7 +285,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npB.SetName("pool-b")
 			npB.SetNamespace(namespace)
 			npB.SetLabels(map[string]string{
-				"upgrade.huc.0xshift.dev/order": "50",
+				"upgrade.huc.0xshift.dev/group": "compute",
 			})
 			_ = unstructured.SetNestedField(npB.Object, clusterName, "spec", "clusterName")
 			_ = unstructured.SetNestedField(npB.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
@@ -298,13 +298,13 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Delete(ctx, npB)
 			}()
 
-			// pool-c: priority 50, version 4.20.44, OMITTED from HCU spec (should still roll out sequential)
+			// pool-c: compute group, version 4.20.44
 			npC := &unstructured.Unstructured{}
 			npC.SetGroupVersionKind(gvkNP)
 			npC.SetName("pool-c")
 			npC.SetNamespace(namespace)
 			npC.SetLabels(map[string]string{
-				"upgrade.huc.0xshift.dev/order": "50",
+				"upgrade.huc.0xshift.dev/group": "compute",
 			})
 			_ = unstructured.SetNestedField(npC.Object, clusterName, "spec", "clusterName")
 			_ = unstructured.SetNestedField(npC.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
@@ -315,6 +315,22 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 			defer func() {
 				_ = k8sClient.Delete(ctx, npC)
+			}()
+
+			// pool-d: no group label, version 4.20.44 (should default to "default" group and run last)
+			npD := &unstructured.Unstructured{}
+			npD.SetGroupVersionKind(gvkNP)
+			npD.SetName("pool-d")
+			npD.SetNamespace(namespace)
+			_ = unstructured.SetNestedField(npD.Object, clusterName, "spec", "clusterName")
+			_ = unstructured.SetNestedField(npD.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
+			_ = unstructured.SetNestedField(npD.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(npD.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "status", "version")
+
+			Expect(k8sClient.Create(ctx, npD)).To(Succeed())
+
+			defer func() {
+				_ = k8sClient.Delete(ctx, npD)
 			}()
 
 			// 3. Create the HCU Upgrade Coordinator CR (concurrency = 2)
@@ -329,12 +345,12 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					RolloutPolicy: &upgradev1alpha1.RolloutPolicySpec{
 						MaxParallelNodePools: 2,
 					},
-					NodePools: []upgradev1alpha1.NodePoolUpgradeSpec{
+					NodePoolGroups: []upgradev1alpha1.NodePoolGroupSpec{
 						{
-							Name: "pool-a",
+							Name: "infra",
 						},
 						{
-							Name: "pool-b",
+							Name: "compute",
 						},
 					},
 				},
@@ -346,7 +362,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Delete(ctx, hcu)
 			}()
 
-			// 4. Verify that the priority 10 NodePool (pool-a) upgrades first!
+			// 4. Verify that the infra group NodePool (pool-a) upgrades first!
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
 				fetchedNP.SetGroupVersionKind(gvkNP)
@@ -363,7 +379,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				return pUntil
 			}, timeout, interval).Should(Equal("false"))
 
-			// Verify that priority 50 NodePools (pool-b and pool-c) remain paused
+			// Verify that compute and default group NodePools remain paused
 			Consistently(func() string {
 				fetchedNP := &unstructured.Unstructured{}
 				fetchedNP.SetGroupVersionKind(gvkNP)
@@ -379,7 +395,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			_ = unstructured.SetNestedField(fetchedNPA.Object, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "status", "version")
 			Expect(k8sClient.Update(ctx, fetchedNPA)).To(Succeed())
 
-			// 6. Verify that priority 50 group NodePools (pool-b and pool-c) both begin upgrading in parallel!
+			// 6. Verify that compute group NodePools (pool-b and pool-c) both begin upgrading in parallel!
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
 				fetchedNP.SetGroupVersionKind(gvkNP)
@@ -396,6 +412,15 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				return val
 			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
 
+			// Verify that fallback default group NodePool (pool-d) remains paused during compute rollout
+			Consistently(func() string {
+				fetchedNP := &unstructured.Unstructured{}
+				fetchedNP.SetGroupVersionKind(gvkNP)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-d", Namespace: namespace}, fetchedNP)
+				pUntil, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "pausedUntil")
+				return pUntil
+			}, time.Second*2, interval).Should(Equal("true"))
+
 			// 7. Verify that HCCO log-scraping successfully parses the mock logs and populates the status blockers!
 			Eventually(func() []string {
 				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
@@ -407,6 +432,36 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				return nil
 			}, timeout, interval).Should(ContainElement(ContainSubstring("cannot evict pod db-pod due to PDB db-pdb")))
+
+			// 8. Simulate compute group (pool-b and pool-c) completes its upgrade
+			fetchedNPB := &unstructured.Unstructured{}
+			fetchedNPB.SetGroupVersionKind(gvkNP)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pool-b", Namespace: namespace}, fetchedNPB)).To(Succeed())
+			_ = unstructured.SetNestedField(fetchedNPB.Object, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "status", "version")
+			Expect(k8sClient.Update(ctx, fetchedNPB)).To(Succeed())
+
+			fetchedNPC := &unstructured.Unstructured{}
+			fetchedNPC.SetGroupVersionKind(gvkNP)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pool-c", Namespace: namespace}, fetchedNPC)).To(Succeed())
+			_ = unstructured.SetNestedField(fetchedNPC.Object, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "status", "version")
+			Expect(k8sClient.Update(ctx, fetchedNPC)).To(Succeed())
+
+			// 9. Verify that fallback default group (pool-d) is now unpaused and begins upgrading!
+			Eventually(func() string {
+				fetchedNP := &unstructured.Unstructured{}
+				fetchedNP.SetGroupVersionKind(gvkNP)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-d", Namespace: namespace}, fetchedNP)
+				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
+				return val
+			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+
+			Eventually(func() string {
+				fetchedNP := &unstructured.Unstructured{}
+				fetchedNP.SetGroupVersionKind(gvkNP)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-d", Namespace: namespace}, fetchedNP)
+				pUntil, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "pausedUntil")
+				return pUntil
+			}, timeout, interval).Should(Equal("false"))
 		})
 	})
 })

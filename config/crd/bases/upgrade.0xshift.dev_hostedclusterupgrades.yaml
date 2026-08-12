@@ -86,23 +86,22 @@ spec:
                   Must match pattern: registry.domain.com/path:version-arch@sha256:digest
                 pattern: ^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$
                 type: string
-              nodePools:
+              nodePoolGroups:
                 description: |-
-                  NodePools lists the scheduling and rollout configurations for worker NodePools.
-                  Because NodePool upgrades require machine drains/reboots and are highly disruptive,
-                  SREs schedule individual NodePools to execute sequentially during distinct,
-                  low-traffic maintenance windows.
+                  NodePoolGroups lists the sequential rollout groups and their maintenance window start schedules.
+                  First groups in this list upgrade first. Un-labeled NodePools belong to the "default" group.
                 items:
                   properties:
                     name:
-                      description: Name specifies the exact name of the target NodePool
-                        CR to be upgraded.
+                      description: Name specifies the exact name of the NodePool group
+                        (defined by label upgrade.huc.0xshift.dev/group on individual
+                        NodePools).
                       type: string
                     startAt:
                       description: |-
-                        StartAt is an RFC3339 timestamp indicating the earliest time this specific NodePool upgrade may begin.
-                        If omitted or nil, the NodePool upgrade begins immediately once:
-                          1. Its priority group (defined by labels) becomes active.
+                        StartAt is an RFC3339 timestamp indicating the earliest time this specific NodePool group upgrade may begin.
+                        If omitted or nil, the NodePool group upgrade begins immediately once:
+                          1. Its position in the ordered list is active (all prior groups completed).
                           2. The control plane upgrade has been fully completed and verified.
                       format: date-time
                       type: string
@@ -138,7 +137,7 @@ spec:
                 type: string
             required:
             - controlPlane
-            - nodePools
+            - nodePoolGroups
             - targetReleaseImage
             type: object
           status:
@@ -317,6 +316,10 @@ spec:
                       items:
                         type: string
                       type: array
+                    group:
+                      description: Group specifies the logical rollout group this
+                        NodePool is assigned to (defined by label upgrade.huc.0xshift.dev/group).
+                      type: string
                     name:
                       description: Name of the NodePool.
                       type: string
@@ -346,11 +349,11 @@ spec:
                     phase:
                       description: |-
                         Phase is the current state of this specific NodePool upgrade.
-                        Supported states: "Scheduled", "WaitingForControlPlane", "Upgrading", "Completed", "Blocked"
+                        Supported states: "Scheduled", "WaitingForGroup", "Upgrading", "Completed", "Blocked"
                       type: string
                     scheduledStart:
-                      description: ScheduledStart indicates when this NodePool is
-                        scheduled to begin upgrading (copied from spec.nodePools[].startAt).
+                      description: ScheduledStart indicates when this NodePool's group
+                        is scheduled to begin upgrading (copied from spec.nodePoolGroups[].startAt).
                       format: date-time
                       type: string
                     targetReleaseImage:
@@ -358,6 +361,7 @@ spec:
                         being applied to this NodePool.
                       type: string
                   required:
+                  - group
                   - name
                   - nodes
                   - phase

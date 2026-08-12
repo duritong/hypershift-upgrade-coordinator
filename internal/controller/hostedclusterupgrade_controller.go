@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -558,63 +556,65 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 	metricAggregatedNodeRolloutRatio.WithLabelValues(hcu.Namespace, hcu.Name).Set(aggRatio)
 
-	// 3. Cluster NodePools by label order priority (defaulting to 50 if missing)
+	// 3. Build group execution sequence and map schedules
+	var groupSequence []string
+	hasDefault := false
+	for _, g := range hcu.Spec.NodePoolGroups {
+		groupSequence = append(groupSequence, g.Name)
+		if g.Name == "default" {
+			hasDefault = true
+		}
+	}
+	if !hasDefault {
+		groupSequence = append(groupSequence, "default")
+	}
+
+	groupSchedules := make(map[string]*time.Time)
+	for _, g := range hcu.Spec.NodePoolGroups {
+		if g.StartAt != nil {
+			t := g.StartAt.Time
+			groupSchedules[g.Name] = &t
+		}
+	}
+
+	// 4. Cluster NodePools by label group (defaulting to "default" if missing)
 	type npContext struct {
 		object      unstructured.Unstructured
 		name        string
-		order       int
+		group       string
 		startAt     *time.Time
 		pausedUntil string
 		version     string
 	}
 
-	orderGroups := make(map[int][]npContext)
-	var orderKeys []int
+	groupPoolsMap := make(map[string][]npContext)
 
 	for _, np := range clusterNodePools {
 		name := np.GetName()
 		labels := np.GetLabels()
-		order := 50
-		if labels != nil && labels["upgrade.huc.0xshift.dev/order"] != "" {
-			if val, err := strconv.Atoi(labels["upgrade.huc.0xshift.dev/order"]); err == nil {
-				order = val
-			}
+		groupName := "default"
+		if labels != nil && labels["upgrade.huc.0xshift.dev/group"] != "" {
+			groupName = labels["upgrade.huc.0xshift.dev/group"]
 		}
 
 		pUntil, _, _ := unstructured.NestedString(np.Object, "spec", "pausedUntil")
 		version, _, _ := unstructured.NestedString(np.Object, "status", "version")
 
-		// Match against spec list to resolve custom StartAt schedules
-		var startAt *time.Time
-		for _, s := range hcu.Spec.NodePools {
-			if s.Name == name && s.StartAt != nil {
-				t := s.StartAt.Time
-				startAt = &t
-				break
-			}
-		}
+		startAt := groupSchedules[groupName]
 
 		c := npContext{
 			object:      np,
 			name:        name,
-			order:       order,
+			group:       groupName,
 			startAt:     startAt,
 			pausedUntil: pUntil,
 			version:     version,
 		}
 
-		reqLogger.Info("Parsed NodePool schema info", "name", name, "order", order, "pausedUntil", pUntil, "version", version)
-
-		if _, exists := orderGroups[order]; !exists {
-			orderGroups[order] = []npContext{}
-			orderKeys = append(orderKeys, order)
-		}
-		orderGroups[order] = append(orderGroups[order], c)
+		reqLogger.Info("Parsed NodePool schema info", "name", name, "group", groupName, "pausedUntil", pUntil, "version", version)
+		groupPoolsMap[groupName] = append(groupPoolsMap[groupName], c)
 	}
 
-	sort.Ints(orderKeys)
-
-	// 4. Sequentially process priority groups (lowest first)
 	hcuStatuses := make([]upgradev1alpha1.NodePoolUpgradeStatus, len(clusterNodePools))
 	idx := 0
 
@@ -628,13 +628,17 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	allCompleted := true
 	priorGroupsCompleted := true
 
-	for _, order := range orderKeys {
-		groupPools := orderGroups[order]
+	for _, grpName := range groupSequence {
+		pools := groupPoolsMap[grpName]
+		if len(pools) == 0 {
+			continue // No NodePools assigned to this group in active cluster
+		}
+
 		groupCompleted := true
 
-		// Count how many pools are currently active/upgrading in this group
+		// Count active upgrading pools in this specific group
 		activeUpgrades := 0
-		for _, np := range groupPools {
+		for _, np := range pools {
 			curVer, _ := parseVersionFromPullspec(hcu.Spec.TargetReleaseImage)
 			npVer, _ := parseVersionFromPullspec(np.version)
 			if isUpstreamGreater(npVer, curVer) && np.pausedUntil != "true" && np.pausedUntil != "True" {
@@ -642,9 +646,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			}
 		}
 
-		reqLogger.Info("Processing NodePool priority group", "order", order, "concurrency", concurrency, "activeUpgrades", activeUpgrades, "groupPoolsCount", len(groupPools))
+		reqLogger.Info("Processing NodePool group", "group", grpName, "concurrency", concurrency, "activeUpgrades", activeUpgrades, "poolsCount", len(pools))
 
-		for _, np := range groupPools {
+		for _, np := range pools {
 			// Extract nodes counts
 			replicas, _, _ := unstructured.NestedInt64(np.object.Object, "status", "replicas")
 			updatedReplicas, _, _ := unstructured.NestedInt64(np.object.Object, "status", "updatedReplicas")
@@ -659,7 +663,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			// Re-run preflight checks immediately before triggering upgrades
 			_, preflightErr := r.checkClusterInstallingAndHealth(uHC)
 
-			reqLogger.Info("Evaluating NodePool specs", "name", np.name, "npVer", npVer, "targetVer", curVer, "pausedUntil", np.pausedUntil, "activeUpgrades", activeUpgrades)
+			reqLogger.Info("Evaluating NodePool specs", "name", np.name, "group", grpName, "npVer", npVer, "targetVer", curVer, "pausedUntil", np.pausedUntil)
 
 			if !isUpstreamGreater(npVer, curVer) {
 				phase = "Completed"
@@ -669,8 +673,8 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				blockers = append(blockers, fmt.Sprintf("Cluster health degraded: %v", preflightErr))
 				groupCompleted = false
 			} else if !priorGroupsCompleted {
-				// Prior priority group is not yet completed. Hold queue.
-				phase = "WaitingForPriority"
+				// Prior group is not yet completed. Hold queue.
+				phase = "WaitingForGroup"
 				groupCompleted = false
 			} else {
 				// Evaluate StartAt schedule
@@ -738,6 +742,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 			hcuStatuses[idx] = upgradev1alpha1.NodePoolUpgradeStatus{
 				Name:               np.name,
+				Group:              grpName,
 				TargetReleaseImage: hcu.Spec.TargetReleaseImage,
 				ScheduledStart:     schedStart,
 				Phase:              phase,
@@ -760,7 +765,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	hcu.Status.NodePoolStatuses = hcuStatuses
 
 	if allCompleted {
-		// All priority groups successfully verified and upgraded! Transition state machine to Completed.
+		// All groups successfully verified and upgraded! Transition state machine to Completed.
 		hcu.Status.Phase = upgradev1alpha1.PhaseCompleted
 		hcu.Status.Message = "All worker NodePools successfully upgraded and verified on target version."
 		return false, 0, nil

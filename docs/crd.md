@@ -17,7 +17,7 @@ The `HostedClusterUpgrade` CR is designed to be user-centric, explicit, and easy
 | **`pausedUntil`** | `string` | *Optional* | SRE escape hatch to pause coordinator reconciliation. Set to `"true"` (or `"True"`) to pause indefinitely in safe read-only "Observe-Only" mode. Set to a future RFC3339 timestamp (e.g. `"2026-08-16T12:00:00Z"`) to pause until that time. Set to `"false"` or omit to run normally. |
 | **`controlPlane.startAt`** | `string` | *Optional* | An RFC3339 timestamp indicating the earliest time the control plane upgrade may begin. If omitted or nil, the control plane upgrade starts immediately once preflight checks pass. |
 | **`rolloutPolicy.maxParallelNodePools`** | `integer` | *Optional* | The maximum number of worker NodePools within the same priority group that can be upgraded concurrently. Defaults to `1`. |
-| **`nodePools`** | `array` | **Required** | List of worker NodePools to coordinate. Each element requires a `name` and optional scheduled `startAt` RFC3339 timestamp. |
+| **`nodePoolGroups`** | `array` | **Required** | List of sequential NodePool groups to coordinate rollout schedules. First groups in this list upgrade first. Un-labeled NodePools default to the `"default"` group. Each element requires a `name` and optional scheduled `startAt` RFC3339 timestamp. |
 
 ---
 
@@ -161,10 +161,10 @@ spec:
   rolloutPolicy:
     maxParallelNodePools: 1
 
-  nodePools:
-    - name: workers-us-east-1a
+  nodePoolGroups:
+    - name: infra
       startAt: "2026-08-15T04:00:00Z"
-    - name: workers-us-east-1b
+    - name: compute
       startAt: "2026-08-15T05:00:00Z"
 ```
 
