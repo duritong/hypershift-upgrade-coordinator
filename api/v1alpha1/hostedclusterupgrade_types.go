@@ -211,6 +211,10 @@ type NodeStatusSummary struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the upgrade state machine"
+//+kubebuilder:printcolumn:name="Target-Image",type="string",JSONPath=".spec.targetReleaseImage",description="Target OpenShift release image"
+//+kubebuilder:printcolumn:name="Status-Message",type="string",JSONPath=".status.message",description="Current status message"
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // HostedClusterUpgrade is the Schema for the hostedclusterupgrades API
 type HostedClusterUpgrade struct {

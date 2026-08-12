@@ -14,7 +14,23 @@ spec:
     singular: hostedclusterupgrade
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: Current phase of the upgrade state machine
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: Target OpenShift release image
+      jsonPath: .spec.targetReleaseImage
+      name: Target-Image
+      type: string
+    - description: Current status message
+      jsonPath: .status.message
+      name: Status-Message
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: HostedClusterUpgrade is the Schema for the hostedclusterupgrades

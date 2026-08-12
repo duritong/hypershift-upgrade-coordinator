@@ -22,8 +22,9 @@ It manages the entire lifecycle of cluster upgrades—from preflight health chec
 
 ## 📂 Documentation
 
-Detailed designs and specifications can be found in the `docs/` folder:
+Detailed designs, guides, and specifications can be found in the `docs/` folder:
 
+* **[User Guide](docs/user-guide.md):** Comprehensive step-by-step instructions on operator installation, setup, triggering upgrades, configuring NodePool priorities, and troubleshooting blocked node drains.
 * **[North Star Vision](docs/vision.md):** Proactive SRE vision, core pillars (staggered scheduling, zero-trust verification, readiness dashboards), and operational context.
 * **[Architecture & Design Doc](docs/architecture.md):** Detailed explanation of the state machine scheduling gates, Extended Update Support (EUS) mechanics, label-based NodePool ordering, multi-namespace least-privilege security model, and pause/resume execution.
 * **[CRD Specification](docs/crd.md):** The Custom Resource schema (`HostedClusterUpgrade`), including API layout, struct definitions, and ArgoCD integration.
