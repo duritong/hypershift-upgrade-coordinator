@@ -44,6 +44,7 @@ var k8sClient client.Client
 var testEnv *envtest.Environment
 var ctx context.Context
 var cancel context.CancelFunc
+var testLogScraper = &DefaultMockLogScraper{}
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -91,6 +92,7 @@ var _ = BeforeSuite(func() {
 		Client:                 mgr.GetClient(),
 		Scheme:                 mgr.GetScheme(),
 		HostedClusterNamespace: "default",
+		LogScraper:             testLogScraper,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
