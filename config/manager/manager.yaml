@@ -70,6 +70,9 @@ spec:
         - /manager
         args:
         - --leader-elect
+        - --zap-encoder=json
+        - --zap-devel=false
+        - --zap-log-level=info
         image: controller:latest
         name: manager
         securityContext:
