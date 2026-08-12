@@ -1,0 +1,44 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: hostedclusters.hypershift.openshift.io
+spec:
+  group: hypershift.openshift.io
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                release:
+                  type: object
+                  properties:
+                    image:
+                      type: string
+            status:
+              type: object
+              properties:
+                releaseImage:
+                  type: string
+                version:
+                  type: object
+                  properties:
+                    history:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          version:
+                            type: string
+                          state:
+                            type: string
+  scope: Namespaced
+  names:
+    plural: hostedclusters
+    singular: hostedcluster
+    kind: HostedCluster

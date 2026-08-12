@@ -96,6 +96,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "HostedClusterUpgrade")
 		os.Exit(1)
 	}
+	if err = (&upgradev1alpha1.HostedClusterUpgrade{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "HostedClusterUpgrade")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
