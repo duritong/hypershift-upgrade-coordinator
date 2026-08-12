@@ -17,19 +17,18 @@ To enforce security and stability across the fleet, a validating admission webho
 - **Rule:** A `HostedClusterUpgrade` CR **must have the exact same name** as the target `HostedCluster` it is coordinating in its namespace. Reject creation if no such `HostedCluster` exists.
 
 ### B. Pullspec Structural Regex
-- **Rule:** Both `spec.targetReleaseImage` and each of `spec.intermediateReleaseImages` must match a full registry pullspec with a `<version>-<arch>` tag and a `sha256` digest:
+- **Rule:** Both `spec.targetReleaseImage` and `spec.intermediateReleaseImage` (if specified) must match a full registry pullspec with a `<version>-<arch>` tag and a `sha256` digest:
   - **Format:** `registry.domain.com/repo/image:<version>-<arch>@sha256:<64-hex-chars>`
-  - **Example:** `registry.example.com/path/to/release:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef`
+  - **Example:** `quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c70fca183e380c6121a1c847806f11e839482123277235a8579db472b9ccf2`
   - **Regex Annotation:** 
     `^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
 
-### C. Monotonic Version Progression (No Downgrades)
+### C. Monotonic Version Progression & Strict 1-Minor Jump Gate
 - **Rule:** The webhook must fetch the target `HostedCluster` and extract its current active version (from `.status.version.history` or `.status.releaseImage`).
-- **Validation:** The webhook will parse the semantic version portion (e.g. `4.20.44` from `4.20.44-x86_64`) of all images and assert that:
-  1. The first intermediate version (if any) is strictly **greater than** the current cluster version.
-  2. Each subsequent intermediate version is strictly **greater than** the previous intermediate version.
-  3. The target version is strictly **greater than** the final intermediate version (or the current cluster version if no intermediates are defined).
-- **Outcome:** Reject CR creation or updates if any step represents a downgrade or lateral version change (e.g. attempting to "upgrade" from `4.22.2` to `4.22.2` or `4.21.5`). If issues occur with specific versions during runtime, the SRE's escape hatch is to pause the upgrade coordinator (`pausedUntil: "true"`) and manually intervene in the objects.
+- **Validation:** The webhook will parse the semantic version portion of all images and assert that:
+  1. The intermediate version (if specified) is strictly **greater than** the current cluster version and is **at most 1 minor version jump** ahead (e.g. `4.12` -> `4.13`).
+  2. The target version is strictly **greater than** the intermediate version (or current version if no intermediate is specified) and is **at most 1 minor version jump** ahead (e.g. `4.13` -> `4.14`, or direct `4.13` -> `4.14` without intermediate).
+- **Outcome:** Reject CR creation or updates if any step represents a downgrade, a multi-minor jump without intermediate, or an overall jump greater than 2 minor versions (e.g. `4.12` -> `4.15` is blocked altogether). If issues occur with specific versions during runtime, the SRE's escape hatch is to pause the upgrade coordinator (`pausedUntil: "true"`) and manually intervene.
 
 ### D. StartAt Label-Order Consistency
 - **Rule:** Validate that the scheduled `StartAt` times for NodePools are logically consistent with their priority groups (determined by the `upgrade.huc.0xshift.dev/order` label on each NodePool). Specifically, for any two NodePools $A$ and $B$:
@@ -56,15 +55,14 @@ type HostedClusterUpgradeSpec struct {
 	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
 	TargetReleaseImage string `json:"targetReleaseImage"`
 
-	// IntermediateReleaseImages lists the OCP release payload images that the control plane
-	// must jump through sequentially before upgrading to the TargetReleaseImage.
-	// Used for EUS (Extended Update Support) / multi-hop upgrades (e.g., 4.20 -> 4.21 -> 4.22).
-	// If omitted or empty, the upgrade proceeds as a standard direct upgrade (e.g. 4.21.m -> 4.22.n, or 4.20.a -> 4.20.b)
-	// without intermediate jumps.
-	// Each image must match pattern: registry.domain.com/path:version-arch@sha256:digest
+	// IntermediateReleaseImage is the single optional OCP release payload image that the control plane
+	// must jump through before upgrading to the TargetReleaseImage.
+	// Used for EUS (Extended Update Support) intermediate hops (e.g., 4.12 -> 4.13 -> 4.14).
+	// If omitted, the upgrade proceeds as a standard direct upgrade (e.g., 4.13 -> 4.14).
+	// Must match pattern: registry.domain.com/path:version-arch@sha256:digest
 	// +optional
-	// +kubebuilder:validation:Items:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
-	IntermediateReleaseImages []string `json:"intermediateReleaseImages,omitempty"`
+	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
+	IntermediateReleaseImage string `json:"intermediateReleaseImage,omitempty"`
 
 	// PausedUntil can be used to pause reconciliation on this upgrade coordinator.
 	// If set to "true" or "True", reconciliation is paused indefinitely (observe-only mode).

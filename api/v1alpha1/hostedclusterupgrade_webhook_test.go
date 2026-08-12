@@ -123,12 +123,10 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 					Name:      clusterName,
 				},
 				Spec: HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					IntermediateReleaseImages: []string{
-						"quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					},
-					NodePools:    []NodePoolUpgradeSpec{},
-					ControlPlane: ControlPlaneUpgradeSpec{},
+					TargetReleaseImage:       "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePools:                []NodePoolUpgradeSpec{},
+					ControlPlane:             ControlPlaneUpgradeSpec{},
 				},
 			}
 
@@ -137,6 +135,41 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 
 			// Cleanup the upgrade CR
 			_ = k8sClient.Delete(context.Background(), hcuValid)
+
+			// Scenario 3: Direct 2-minor jump (4.20.44 -> 4.22.2) without intermediate - Should be rejected
+			hcuDirectMultiMinor := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: nsName,
+					Name:      clusterName,
+				},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePools:          []NodePoolUpgradeSpec{},
+					ControlPlane:       ControlPlaneUpgradeSpec{},
+				},
+			}
+
+			err = k8sClient.Create(context.Background(), hcuDirectMultiMinor)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unsupported direct multi-minor jump"))
+
+			// Scenario 4: 3-minor jump with intermediate (4.20.44 -> 4.23.2 via 4.21.5) - Should be rejected because 4.21.5 -> 4.23.2 exceeds 1-minor jump
+			hcuThreeMinor := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: nsName,
+					Name:      clusterName,
+				},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage:       "quay.io/ocp:4.23.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePools:                []NodePoolUpgradeSpec{},
+					ControlPlane:             ControlPlaneUpgradeSpec{},
+				},
+			}
+
+			err = k8sClient.Create(context.Background(), hcuThreeMinor)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("is more than 1 minor version ahead of intermediate version"))
 		})
 
 		It("should reject conflicting NodePool scheduled times based on label priority", func() {
@@ -207,8 +240,9 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 					Name:      clusterName,
 				},
 				Spec: HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					ControlPlane:       ControlPlaneUpgradeSpec{},
+					TargetReleaseImage:       "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					IntermediateReleaseImage: "quay.io/ocp:4.21.5-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:             ControlPlaneUpgradeSpec{},
 					NodePools: []NodePoolUpgradeSpec{
 						{
 							Name:    "pool-a",

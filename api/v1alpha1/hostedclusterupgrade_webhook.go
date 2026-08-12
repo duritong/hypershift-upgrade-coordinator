@@ -122,26 +122,64 @@ func (r *HostedClusterUpgrade) validateUpgradeSpec() error {
 		return fmt.Errorf("spec.targetReleaseImage format is invalid: %v", err)
 	}
 
-	parsedIntermediates := make([]string, len(r.Spec.IntermediateReleaseImages))
-	for i, img := range r.Spec.IntermediateReleaseImages {
-		v, err := parseVersionFromPullspec(img)
+	var intermediateVersion string
+	if r.Spec.IntermediateReleaseImage != "" {
+		v, err := parseVersionFromPullspec(r.Spec.IntermediateReleaseImage)
 		if err != nil {
-			return fmt.Errorf("spec.intermediateReleaseImages[%d] format is invalid: %v", i, err)
+			return fmt.Errorf("spec.intermediateReleaseImage format is invalid: %v", err)
 		}
-		parsedIntermediates[i] = v
+		intermediateVersion = v
 	}
 
-	// 4. Enforce Monotonic Version Progression (strictly greater transitions)
-	lastVersion := currentVersion
-	for i, v := range parsedIntermediates {
-		if !isUpstreamGreater(lastVersion, v) {
-			return fmt.Errorf("invalid version progression: intermediate version '%s' at index %d is not strictly greater than previous version '%s'", v, i, lastVersion)
-		}
-		lastVersion = v
+	// 4. Enforce Monotonic Version Progression and Strict At-Most-1-Minor Jumps
+	currMajor, currMinor, err := getMajorMinor(currentVersion)
+	if err != nil {
+		return err
 	}
 
-	if !isUpstreamGreater(lastVersion, targetVersion) {
-		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than previous version '%s'", targetVersion, lastVersion)
+	tgtMajor, tgtMinor, err := getMajorMinor(targetVersion)
+	if err != nil {
+		return err
+	}
+
+	if intermediateVersion != "" {
+		intMajor, intMinor, err := getMajorMinor(intermediateVersion)
+		if err != nil {
+			return err
+		}
+
+		// First step: Current -> Intermediate
+		if !isUpstreamGreater(currentVersion, intermediateVersion) {
+			return fmt.Errorf("invalid version progression: intermediate version '%s' is not strictly greater than current version '%s'", intermediateVersion, currentVersion)
+		}
+		if currMajor != intMajor {
+			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, intMajor)
+		}
+		if intMinor-currMinor > 1 {
+			return fmt.Errorf("invalid minor version jump: intermediate version '%s' is more than 1 minor version ahead of current version '%s'", intermediateVersion, currentVersion)
+		}
+
+		// Second step: Intermediate -> Target
+		if !isUpstreamGreater(intermediateVersion, targetVersion) {
+			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than intermediate version '%s'", targetVersion, intermediateVersion)
+		}
+		if intMajor != tgtMajor {
+			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", intMajor, tgtMajor)
+		}
+		if tgtMinor-intMinor > 1 {
+			return fmt.Errorf("invalid minor version jump: target version '%s' is more than 1 minor version ahead of intermediate version '%s'", targetVersion, intermediateVersion)
+		}
+	} else {
+		// Direct step: Current -> Target
+		if !isUpstreamGreater(currentVersion, targetVersion) {
+			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
+		}
+		if currMajor != tgtMajor {
+			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, tgtMajor)
+		}
+		if tgtMinor-currMinor > 1 {
+			return fmt.Errorf("unsupported direct multi-minor jump: target version '%s' is more than 1 minor version ahead of current version '%s'. You must specify a singular intermediateReleaseImage for EUS hops (at most 2 minor versions overall).", targetVersion, currentVersion)
+		}
 	}
 
 	// 5. NodePool Priority Order & StartAt Chronological Consistency Check
@@ -236,4 +274,22 @@ func isUpstreamGreater(vPrev, vNext string) bool {
 	pPrev := "v" + vPrev
 	pNext := "v" + vNext
 	return semver.Compare(pPrev, pNext) < 0
+}
+
+// getMajorMinor parses a version string like "4.20.5" or "4.12" and returns major, minor as integers.
+func getMajorMinor(version string) (int, int, error) {
+	version = strings.TrimPrefix(version, "v")
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return 0, 0, fmt.Errorf("invalid semantic version format (expected major.minor.patch): %s", version)
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse major version: %v", err)
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse minor version: %v", err)
+	}
+	return major, minor, nil
 }

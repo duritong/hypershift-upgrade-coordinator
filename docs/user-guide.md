@@ -6,7 +6,7 @@ This user guide provides step-by-step instructions on how to install, configure,
 
 ## 1. Overview
 
-The HyperShift Upgrade Coordinator is an offline-capable, highly observable Kubernetes operator designed to automate staggered, multi-day, or sequential upgrades of OpenShift Hosted Control Planes and worker NodePools.
+The HyperShift Upgrade Coordinator is an Kubernetes operator designed to automate staggered, multi-day, or sequential upgrades of OpenShift Hosted Control Planes and worker NodePools.
 
 ### Key Capabilities
 *   **1:1 Naming Coalignment**: Enforces strict validation that the upgrade resource name exactly matches the target `HostedCluster`.
@@ -85,12 +85,11 @@ metadata:
   name: production-cluster-01       # MUST match target HostedCluster name
   namespace: default                # MUST match target HostedCluster namespace
 spec:
-  # Target Release Image to upgrade the cluster to
-  targetReleaseImage: quay.io/openshift-release-dev/ocp-release:4.14.10-x86_64
+  # Target Release Image to upgrade the cluster to (Tag + SHA Digest are mandatory)
+  targetReleaseImage: quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c70fca183e380c6121a1c847806f11e839482123277235a8579db472b9ccf2
 
-  # Optional: Intermediate hops (e.g. EUS-to-EUS jumps)
-  intermediateReleaseImages:
-    - quay.io/openshift-release-dev/ocp-release:4.13.20-x86_64
+  # Optional EUS Intermediate release hop (Tag + SHA Digest are mandatory)
+  intermediateReleaseImage: quay.io/openshift-release-dev/ocp-release:4.13.0-x86_64@sha256:74b23ed4bbb593195a721373ed6693687a9b444c97065ce8ac653ba464375711
 
   # Maintenance window for the Hosted Control Plane
   controlPlane:
@@ -117,16 +116,52 @@ oc apply -f upgrade.yaml
 
 ---
 
-## 6. Upgrade Progression and Lifecycle
+## 6. SRE Safety Gates and Skip Behavior
 
-The coordinator progresses the upgrade through a structured state machine:
+To protect workloads and preserve cluster connectivity, the operator enforces several strict version boundaries:
 
-1.  **Preflight Checks (`PreflightChecks`)**: Asserts that the target `HostedCluster` is healthy, not currently in initial installation, and contains no failing/degraded conditions.
-2.  **Pending Schedule (`PendingSchedule`)**: Waits until the Control Plane's scheduled `startAt` window opens.
-3.  **Upgrading Control Plane (`UpgradingControlPlane`)**: Sets the control plane release image on the `HostedCluster` resource (initiating the first intermediate hop or the final target image).
-4.  **Verifying Control Plane (`VerifyingControlPlane`)**: Waits for all individual `ControlPlaneComponents` (apiserver, etcd, etc.) to report `Available` and `RolloutComplete` at the expected version.
-5.  **Upgrading NodePools (`UpgradingNodePools`)**: Unpauses and upgrades worker NodePools in sequential order based on label priorities, respecting individual `startAt` schedules and the concurrency policy.
-6.  **Completed (`Completed`)**: Sets the final status once all Hosted Control Plane components and worker NodePools are fully verified on the target version.
+### A. Strict 1-Minor Version Jump Validation
+To respect the maximum 2-minor node-to-control-plane version skew limit in Kubernetes, the validating admission webhook ensures:
+*   **Direct upgrades**: If no `intermediateReleaseImage` is specified, the jump from the current version to the target version **cannot exceed 1 minor version** (e.g. `4.13` -> `4.14` is allowed; `4.12` -> `4.14` direct is blocked).
+*   **EUS upgrades**: If `intermediateReleaseImage` is specified, both the $Current \rightarrow Intermediate$ and $Intermediate \rightarrow Target$ jumps **cannot exceed exactly 1 minor version** (e.g. `4.12` -> `4.13` -> `4.14` is allowed; `4.12` -> `4.13` -> `4.15` is blocked).
+Any configuration violating these limits is immediately rejected by the validating webhook at the API layer.
+
+### B. Self-Healing Skip Behavior
+If an SRE specifies an `intermediateReleaseImage` (e.g. `4.13.0`), but the cluster is already running a newer version (e.g. `4.13.12` or `4.14.0` due to manual manual SRE intervention or partial rollouts), the coordinator dynamically **skips** applying the intermediate version and proceeds directly to the `targetReleaseImage`. This protects the cluster from redundant downgrade attempts.
+
+---
+
+## 7. Upgrade Progression and Lifecycle
+
+The coordinator progresses the upgrade through a structured, multi-step state machine:
+
+### A. Preflight Checks (`PreflightChecks` Phase)
+Before making any mutations to the cluster, the coordinator performs strict, automated health-gate checks. These checks are designed to prevent initiating upgrades on cluster setups that are in a compromised or unfinished state:
+1.  **Installation Phase Check**: Inspects `.status.version.history` on the target `HostedCluster`. If no history entries are present (or if the initial installation progressing status is active), the coordinator holds the upgrade, transitions to the `Installing` phase, and waits for the initial installation to complete successfully.
+2.  **Cluster Degradation Checks**: Iterates over all conditions inside `.status.conditions` on the `HostedCluster`:
+    *   **Failing Condition Gate**: If the `Failing` condition is `True`, the upgrade is blocked, transitioning the coordinator to `Blocked` with the failure message.
+    *   **Degraded Condition Gate**: If the `Degraded` condition is `True`, the upgrade is blocked, transitioning the coordinator to `Blocked` with the degraded details.
+3.  **Pre-Step Health Re-verification**: These preflight checks do not run only once. The coordinator **re-runs these exact health evaluations immediately before initiating any transition** (e.g. unpausing a NodePool or shifting between EUS intermediate and target control plane versions) to ensure safety throughout the entire lifecycle.
+
+### B. Pending Schedule (`PendingSchedule` Phase)
+Waits until the Hosted Control Plane's scheduled `startAt` maintenance window opens.
+
+### C. Upgrading Control Plane (`UpgradingControlPlane` Phase)
+Applies the next release version (the `intermediateReleaseImage` if defined and not skipped, or the final `targetReleaseImage`) directly on the `spec.release.image` field of the target `HostedCluster`.
+
+### D. Verifying Control Plane (`VerifyingControlPlane` Phase)
+The coordinator does not rely on simple high-level conditions to assume the control plane is upgraded. Instead, it runs exhaustive, low-level component verification:
+1.  **Expected Release Image Check**: Ensures that the `HostedCluster.status.releaseImage` has been updated by the underlying HyperShift operator to match the exact expected release image.
+2.  **Control Plane Component (CPC) Deep-Verification**: List all `ControlPlaneComponent` (CPC) resources residing in the control plane namespace (e.g., `<hc_namespace>-<cluster_name>`, verifying components like `kube-apiserver`, `etcd`, `openshift-apiserver`):
+    *   **Availability**: Asserts that each component's `Available` condition is strictly `True`.
+    *   **Rollout Completeness**: Asserts that each component's `RolloutComplete` condition is strictly `True`.
+3.  **Complete Readiness Gate**: Verification only succeeds when **all** active control plane components simultaneously report both `Available` and `RolloutComplete` on the expected target version. Only then is the control plane verified and worker NodePool upgrades initiated.
+
+### E. Upgrading NodePools (`UpgradingNodePools` Phase)
+Unpauses and upgrades worker NodePools in sequential order based on label priorities, respecting individual `startAt` schedules and the concurrency policy.
+
+### F. Completed (`Completed` Phase)
+Sets the final status once all Hosted Control Plane components and worker NodePools are fully verified on the target version.
 
 ---
 

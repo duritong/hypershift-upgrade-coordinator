@@ -345,13 +345,13 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		var nextReleaseImage string
 		var stepLabel string
 
-		if len(hcu.Spec.IntermediateReleaseImages) > 0 {
-			firstIntImage := hcu.Spec.IntermediateReleaseImages[0]
-			firstIntVer, _ := parseVersionFromPullspec(firstIntImage)
+		if hcu.Spec.IntermediateReleaseImage != "" {
+			intImage := hcu.Spec.IntermediateReleaseImage
+			intVer, _ := parseVersionFromPullspec(intImage)
 
-			if isUpstreamGreater(currentVer, firstIntVer) {
-				nextReleaseImage = firstIntImage
-				stepLabel = fmt.Sprintf("Intermediate (%s)", firstIntVer)
+			if isUpstreamGreater(currentVer, intVer) {
+				nextReleaseImage = intImage
+				stepLabel = fmt.Sprintf("Intermediate (%s)", intVer)
 			}
 		}
 
@@ -471,8 +471,8 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(hcu *upgradev1alpha1
 	targetVer, _ := parseVersionFromPullspec(hcu.Spec.TargetReleaseImage)
 
 	var intermediateVer string
-	if len(hcu.Spec.IntermediateReleaseImages) > 0 {
-		intermediateVer, _ = parseVersionFromPullspec(hcu.Spec.IntermediateReleaseImages[0])
+	if hcu.Spec.IntermediateReleaseImage != "" {
+		intermediateVer, _ = parseVersionFromPullspec(hcu.Spec.IntermediateReleaseImage)
 	}
 
 	metricPhase.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, intermediateVer).Set(phaseVal)

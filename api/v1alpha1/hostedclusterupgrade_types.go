@@ -28,15 +28,14 @@ type HostedClusterUpgradeSpec struct {
 	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
 	TargetReleaseImage string `json:"targetReleaseImage"`
 
-	// IntermediateReleaseImages lists the OCP release payload images that the control plane
-	// must jump through sequentially before upgrading to the TargetReleaseImage.
-	// Used for EUS (Extended Update Support) / multi-hop upgrades (e.g., 4.20 -> 4.21 -> 4.22).
-	// If omitted or empty, the upgrade proceeds as a standard direct upgrade (e.g. 4.21.m -> 4.22.n, or 4.20.a -> 4.20.b)
-	// without intermediate jumps.
-	// Each image must match pattern: registry.domain.com/path:version-arch@sha256:digest
+	// IntermediateReleaseImage is the single optional OCP release payload image that the control plane
+	// must jump through before upgrading to the TargetReleaseImage.
+	// Used for EUS (Extended Update Support) intermediate hops (e.g., 4.12 -> 4.13 -> 4.14).
+	// If omitted, the upgrade proceeds as a standard direct upgrade (e.g., 4.13 -> 4.14).
+	// Must match pattern: registry.domain.com/path:version-arch@sha256:digest
 	// +optional
-	// +kubebuilder:validation:Items:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
-	IntermediateReleaseImages []string `json:"intermediateReleaseImages,omitempty"`
+	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
+	IntermediateReleaseImage string `json:"intermediateReleaseImage,omitempty"`
 
 	// PausedUntil can be used to pause reconciliation on this upgrade coordinator.
 	// If set to "true" or "True", reconciliation is paused indefinitely (observe-only mode).
