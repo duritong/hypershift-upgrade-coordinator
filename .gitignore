@@ -1,0 +1,11 @@
+G*.md
+
+# checked out source code for assistance
+tmp/
+
+# Ignore swap files
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
