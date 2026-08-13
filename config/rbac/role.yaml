@@ -13,16 +13,9 @@ rules:
   - get
   - list
 - apiGroups:
-  - controlplane.hypershift.openshift.io
-  resources:
-  - controlplanecomponents
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - hypershift.openshift.io
   resources:
+  - controlplanecomponents
   - hostedclusters
   - nodepools
   verbs:

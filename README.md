@@ -106,9 +106,22 @@ Detailed designs, guides, and specifications can be found in the `docs/` folder:
 ## 🏗️ Technical Stack
 
 The operator is built on standard Kubernetes operator tooling:
-- **Language:** Go
-- **Framework:** `operator-sdk` (Go v4 plugin, using `controller-runtime` under the hood)
+- **Language:** Go 1.26
+- **Framework:** `operator-sdk` (using `controller-runtime` v0.24)
 - **APIs Consumed:**
-  - `hypershift.openshift.io/v1beta1` (`HostedCluster`, `NodePool`, `HostedControlPlane`)
-  - `controlplane.hypershift.openshift.io/v1alpha1` (`ControlPlaneComponent`)
+  - `hypershift.openshift.io/v1beta1` (`HostedCluster`, `NodePool`, `ControlPlaneComponent` imported directly via `github.com/openshift/hypershift/api/hypershift/v1beta1`)
 - **Metrics:** Exposes Prometheus metrics via `/metrics` endpoint (such as active upgrade phase, duration, and blocked NodePool counts).
+
+---
+
+## 💻 Development & Updating CRDs
+
+To keep test CRD definitions in sync with the upstream HyperShift project (`openshift/hypershift`):
+
+```bash
+# Fetch and update official HyperShift CRDs in test/crds/
+make update-crds
+
+# Run all unit and integration envtests
+make test
+```

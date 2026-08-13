@@ -206,3 +206,16 @@ If a worker NodePool rollout stalls, the coordinator automatically scrapes the l
             - "failed to drain node 'ip-10-0-142-3.ec2.internal': cannot evict pod 'my-app-pod' in namespace 'app' due to PDB 'my-app-pdb'"
     ```
 3.  **Resolve blockages**: Temporarily scale down or bypass the offending PDBs/deployments inside the guest cluster to allow the node drainer to proceed smoothly.
+
+---
+
+### Maintenance & Keeping HyperShift CRDs Up to Date
+To keep the envtest test suite updated with the latest upstream `openshift/hypershift` CustomResourceDefinitions:
+
+```bash
+# Fetch and update official CRDs into test/crds/
+make update-crds
+
+# Execute test suite against updated schemas
+make test
+```

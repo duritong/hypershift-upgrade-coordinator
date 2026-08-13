@@ -103,6 +103,15 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/...;./internal/...;./cmd/..." output:object:dir=api/v1alpha1
 
+.PHONY: update-crds
+update-crds: ## Fetch and update official HyperShift CRDs for envtest from openshift/hypershift
+	@echo "Fetching latest CRDs from https://raw.githubusercontent.com/openshift/hypershift/main..."
+	@mkdir -p test/crds
+	@curl -sSL "https://raw.githubusercontent.com/openshift/hypershift/main/cmd/install/assets/crds/hypershift-operator/zz_generated.crd-manifests/hostedclusters-Hypershift-Default.crd.yaml" -o test/crds/hostedclusters.yaml
+	@curl -sSL "https://raw.githubusercontent.com/openshift/hypershift/main/cmd/install/assets/crds/hypershift-operator/zz_generated.crd-manifests/nodepools-Default.crd.yaml" -o test/crds/nodepools.yaml
+	@curl -sSL "https://raw.githubusercontent.com/openshift/hypershift/main/cmd/install/assets/crds/hypershift-operator/zz_generated.crd-manifests/controlplanecomponents.crd.yaml" -o test/crds/controlplanecomponents.yaml
+	@echo "Successfully updated CRDs in test/crds/"
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...

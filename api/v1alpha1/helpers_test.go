@@ -1,0 +1,125 @@
+/*
+Copyright 2026 SRE Fleet Team.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	"testing"
+
+	. "github.com/onsi/gomega"
+)
+
+func TestParseVersionFromPullspec(t *testing.T) {
+	g := NewWithT(t)
+
+	// Valid pullspec with arch suffix
+	v, err := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(v).To(Equal("4.20.44"))
+
+	// Valid pullspec with alternate arch suffix
+	vArch2, errArch2 := ParseVersionFromPullspec("registry.example.com/repo/ocp:4.14.0-amd64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errArch2).NotTo(HaveOccurred())
+	g.Expect(vArch2).To(Equal("4.14.0"))
+
+	// Valid pullspec without dash in tag
+	vNoDash, errNoDash := ParseVersionFromPullspec("registry.example.com/repo/ocp:4.14.0@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errNoDash).NotTo(HaveOccurred())
+	g.Expect(vNoDash).To(Equal("4.14.0"))
+
+	// Invalid pullspecs
+	_, errInvalid := ParseVersionFromPullspec("invalid-pullspec")
+	g.Expect(errInvalid).To(HaveOccurred())
+
+	_, errNoDigest := ParseVersionFromPullspec("quay.io/ocp:4.14.0")
+	g.Expect(errNoDigest).To(HaveOccurred())
+}
+
+func TestExtractVersion(t *testing.T) {
+	g := NewWithT(t)
+
+	// Empty string
+	_, errEmpty := ExtractVersion("")
+	g.Expect(errEmpty).To(HaveOccurred())
+
+	// From pullspec
+	v1, err1 := ExtractVersion("quay.io/openshift-release-dev/ocp-release:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(err1).NotTo(HaveOccurred())
+	g.Expect(v1).To(Equal("4.20.44"))
+
+	// From raw semver string
+	v2, err2 := ExtractVersion("4.13.0")
+	g.Expect(err2).NotTo(HaveOccurred())
+	g.Expect(v2).To(Equal("4.13.0"))
+
+	// From semver string with arch suffix
+	v3, err3 := ExtractVersion("4.13.0-x86_64")
+	g.Expect(err3).NotTo(HaveOccurred())
+	g.Expect(v3).To(Equal("4.13.0"))
+
+	// From v-prefixed string
+	v4, err4 := ExtractVersion("v4.14.2")
+	g.Expect(err4).NotTo(HaveOccurred())
+	g.Expect(v4).To(Equal("4.14.2"))
+
+	// Invalid semver string
+	_, errInv := ExtractVersion("not-a-version")
+	g.Expect(errInv).To(HaveOccurred())
+}
+
+func TestIsUpstreamGreater(t *testing.T) {
+	g := NewWithT(t)
+
+	// Greater
+	g.Expect(IsUpstreamGreater("4.20.44", "4.21.0")).To(BeTrue())
+	g.Expect(IsUpstreamGreater("quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "4.21.0")).To(BeTrue())
+
+	// Not greater
+	g.Expect(IsUpstreamGreater("4.21.0", "4.20.44")).To(BeFalse())
+	g.Expect(IsUpstreamGreater("4.21.0", "4.21.0")).To(BeFalse())
+
+	// Invalid inputs
+	g.Expect(IsUpstreamGreater("invalid", "4.21.0")).To(BeFalse())
+	g.Expect(IsUpstreamGreater("4.20.0", "invalid")).To(BeFalse())
+}
+
+func TestGetMajorMinor(t *testing.T) {
+	g := NewWithT(t)
+
+	major, minor, err := GetMajorMinor("4.14.2")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(major).To(Equal(4))
+	g.Expect(minor).To(Equal(14))
+
+	// From pullspec
+	majorPS, minorPS, errPS := GetMajorMinor("quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errPS).NotTo(HaveOccurred())
+	g.Expect(majorPS).To(Equal(4))
+	g.Expect(minorPS).To(Equal(20))
+
+	// Invalid inputs
+	_, _, errInv := GetMajorMinor("invalid")
+	g.Expect(errInv).To(HaveOccurred())
+
+	_, _, errShort := GetMajorMinor("4")
+	g.Expect(errShort).To(HaveOccurred())
+
+	_, _, errBadMajor := GetMajorMinor("abc.12.0")
+	g.Expect(errBadMajor).To(HaveOccurred())
+
+	_, _, errBadMinor := GetMajorMinor("4.abc.0")
+	g.Expect(errBadMinor).To(HaveOccurred())
+}

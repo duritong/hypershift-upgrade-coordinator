@@ -32,22 +32,22 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 	Context("Unit tests for helper functions", func() {
 		It("should correctly parse semantic version from a compliant release pullspec", func() {
 			ps := "quay.io/openshift-release-dev/ocp-release:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-			v, err := parseVersionFromPullspec(ps)
+			v, err := ParseVersionFromPullspec(ps)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(v).To(Equal("4.20.44"))
 		})
 
 		It("should fail to parse version if pullspec format is invalid", func() {
 			invalidPS := "quay.io/openshift-release-dev/ocp-release:invalid-tag"
-			_, err := parseVersionFromPullspec(invalidPS)
+			_, err := ParseVersionFromPullspec(invalidPS)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should correctly assess monotonic version jumps", func() {
-			Expect(isUpstreamGreater("4.20.44", "4.21.0")).To(BeTrue())
-			Expect(isUpstreamGreater("4.21.5", "4.22.2")).To(BeTrue())
-			Expect(isUpstreamGreater("4.22.2", "4.21.5")).To(BeFalse())
-			Expect(isUpstreamGreater("4.22.2", "4.22.2")).To(BeFalse())
+			Expect(IsUpstreamGreater("4.20.44", "4.21.0")).To(BeTrue())
+			Expect(IsUpstreamGreater("4.21.5", "4.22.2")).To(BeTrue())
+			Expect(IsUpstreamGreater("4.22.2", "4.21.5")).To(BeFalse())
+			Expect(IsUpstreamGreater("4.22.2", "4.22.2")).To(BeFalse())
 		})
 	})
 
@@ -77,21 +77,8 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 		It("should validate version progression against existing HostedCluster", func() {
 			clusterName := "my-cluster"
 
-			// Create a mock HostedCluster using unstructured client to avoid API module imports
-			hc := &unstructured.Unstructured{}
-			hc.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "hypershift.openshift.io",
-				Version: "v1beta1",
-				Kind:    "HostedCluster",
-			})
-			hc.SetName(clusterName)
-			hc.SetNamespace(nsName)
-
-			// Set spec.release.image to current version 4.20.44
-			err := unstructured.SetNestedField(hc.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
-			Expect(err).NotTo(HaveOccurred())
-
-			err = k8sClient.Create(context.Background(), hc)
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			err := k8sClient.Create(context.Background(), hc)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Defer deletion of the mock HostedCluster
@@ -176,15 +163,7 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			clusterName := "sched-cluster"
 
 			// Create target HostedCluster
-			hc := &unstructured.Unstructured{}
-			hc.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "hypershift.openshift.io",
-				Version: "v1beta1",
-				Kind:    "HostedCluster",
-			})
-			hc.SetName(clusterName)
-			hc.SetNamespace(nsName)
-			_ = unstructured.SetNestedField(hc.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 			err := k8sClient.Create(context.Background(), hc)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -223,3 +202,34 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 		})
 	})
 })
+
+func createMockHostedCluster(name, namespace, releaseImage string) *unstructured.Unstructured {
+	hc := &unstructured.Unstructured{}
+	hc.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "hypershift.openshift.io",
+		Version: "v1beta1",
+		Kind:    "HostedCluster",
+	})
+	hc.SetName(name)
+	hc.SetNamespace(namespace)
+
+	_ = unstructured.SetNestedField(hc.Object, releaseImage, "spec", "release", "image")
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"name": "pull-secret"}, "spec", "pullSecret")
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"managementType": "Managed", "managed": map[string]interface{}{"storage": map[string]interface{}{"type": "PersistentVolume"}}}, "spec", "etcd")
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{
+		"clusterNetwork": []interface{}{map[string]interface{}{"cidr": "10.128.0.0/14"}},
+		"serviceNetwork": []interface{}{map[string]interface{}{"cidr": "172.30.0.0/16"}},
+		"networkType":    "OVNKubernetes",
+	}, "spec", "networking")
+
+	services := []interface{}{
+		map[string]interface{}{"service": "APIServer", "servicePublishingStrategy": map[string]interface{}{"type": "LoadBalancer"}},
+		map[string]interface{}{"service": "OAuthServer", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+		map[string]interface{}{"service": "Konnectivity", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+		map[string]interface{}{"service": "Ignition", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+	}
+	_ = unstructured.SetNestedSlice(hc.Object, services, "spec", "services")
+
+	return hc
+}
