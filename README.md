@@ -95,9 +95,10 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
 Detailed designs, guides, and specifications can be found in the `docs/` folder:
 
 * **[User Guide](docs/user-guide.md):** Comprehensive step-by-step instructions on operator installation, setup, triggering upgrades, configuring NodePool groups, and troubleshooting blocked node drains.
+* **[GitOps Integration Guide](docs/gitops.md):** Detailed guide on deploying clusters and worker nodes via ArgoCD without reconciliation fights, complete with ignore-differences rules and custom health scripts.
 * **[North Star Vision](docs/vision.md):** Proactive SRE vision, core pillars (staggered scheduling, zero-trust verification, readiness dashboards), and operational context.
 * **[Architecture & Design Doc](docs/architecture.md):** Detailed explanation of the state machine scheduling gates, Extended Update Support (EUS) mechanics, group-based NodePool sequence unpausing, multi-namespace least-privilege security model, and pause/resume execution.
-* **[CRD Specification](docs/crd.md):** The Custom Resource schema (`HostedClusterUpgrade`), including API layout, struct definitions, and ArgoCD integration.
+* **[CRD Specification](docs/crd.md):** The Custom Resource schema (`HostedClusterUpgrade`), including spec configuration knobs and status telemetry fields.
 * **[Monitoring & Alerting](docs/monitoring.md):** Specification of Prometheus alerts (`PrometheusRule` custom resources) and SRE Grafana dashboard layouts.
 
 ---
