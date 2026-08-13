@@ -45,6 +45,7 @@ func (r *HostedClusterUpgrade) SetupWebhookWithManager(mgr ctrl.Manager) error {
 
 //+kubebuilder:webhook:path=/validate-upgrade-0xshift-dev-v1alpha1-hostedclusterupgrade,mutating=false,failurePolicy=fail,sideEffects=None,groups=upgrade.0xshift.dev,resources=hostedclusterupgrades,verbs=create;update,versions=v1alpha1,name=vhostedclusterupgrade.kb.io,admissionReviewVersions=v1
 
+// +kubebuilder:object:generate=false
 type HostedClusterUpgradeCustomValidator struct {
 	Client client.Client
 }

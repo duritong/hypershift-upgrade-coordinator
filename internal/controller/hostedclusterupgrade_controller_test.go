@@ -31,6 +31,7 @@ import (
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 )
+
 func createAndSetStatusHostedCluster(ctx context.Context, name, namespace, releaseImage string) *unstructured.Unstructured {
 	hc := &unstructured.Unstructured{}
 	hc.SetGroupVersionKind(gvkHC)
