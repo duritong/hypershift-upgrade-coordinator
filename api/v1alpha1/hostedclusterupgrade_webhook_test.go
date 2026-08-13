@@ -200,6 +200,69 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("temporal schedule inconsistency"))
 		})
+
+		It("should validate update and delete custom validator methods", func() {
+			clusterName := "val-update-cluster"
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			err := k8sClient.Create(context.Background(), hc)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hc) }()
+
+			val := &HostedClusterUpgradeCustomValidator{Client: k8sClient}
+
+			// ValidateDelete should succeed
+			warns, err := val.ValidateDelete(context.Background(), &HostedClusterUpgrade{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warns).To(BeNil())
+
+			// ValidateUpdate with valid HostedClusterUpgrade
+			hcuVal := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: clusterName},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePoolGroups:     []NodePoolGroupSpec{},
+					ControlPlane:       ControlPlaneUpgradeSpec{},
+				},
+			}
+			warnsUp, errUp := val.ValidateUpdate(context.Background(), hcuVal, hcuVal)
+			Expect(errUp).NotTo(HaveOccurred())
+			Expect(warnsUp).To(BeNil())
+		})
+
+		It("should reject invalid major version jumps and invalid image formats", func() {
+			clusterName := "major-jump-cluster"
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			err := k8sClient.Create(context.Background(), hc)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hc) }()
+
+			// Major version jump (4.20.44 -> 5.0.0)
+			hcuMajor := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: clusterName},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:5.0.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePoolGroups:     []NodePoolGroupSpec{},
+					ControlPlane:       ControlPlaneUpgradeSpec{},
+				},
+			}
+			err = k8sClient.Create(context.Background(), hcuMajor)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("cannot upgrade across different major versions"))
+
+			// Invalid intermediate release image format
+			hcuBadIntermediate := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: clusterName},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage:       "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					IntermediateReleaseImage: "invalid-image-format",
+					NodePoolGroups:           []NodePoolGroupSpec{},
+					ControlPlane:             ControlPlaneUpgradeSpec{},
+				},
+			}
+			err = k8sClient.Create(context.Background(), hcuBadIntermediate)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid-image-format"))
+		})
 	})
 })
 

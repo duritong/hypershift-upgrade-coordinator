@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestParseVersionFromPullspec(t *testing.T) {
@@ -122,4 +123,58 @@ func TestGetMajorMinor(t *testing.T) {
 
 	_, _, errBadMinor := GetMajorMinor("4.abc.0")
 	g.Expect(errBadMinor).To(HaveOccurred())
+}
+
+func TestHostedClusterUpgradeDeepCopy(t *testing.T) {
+	g := NewWithT(t)
+
+	now := metav1.Now()
+	paused := "true"
+	hcu := &HostedClusterUpgrade{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: HostedClusterUpgradeSpec{
+			TargetReleaseImage:       "quay.io/ocp:4.14.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+			IntermediateReleaseImage: "quay.io/ocp:4.13.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+			PausedUntil:              &paused,
+			ControlPlane: ControlPlaneUpgradeSpec{
+				StartAt: &now,
+			},
+			NodePoolGroups: []NodePoolGroupSpec{
+				{Name: "infra", StartAt: &now},
+			},
+			RolloutPolicy: &RolloutPolicySpec{
+				MaxParallelNodePools: 2,
+			},
+		},
+		Status: HostedClusterUpgradeStatus{
+			Phase:          PhaseUpgradingControlPlane,
+			StartTime:      &now,
+			CompletionTime: &now,
+			ControlPlaneStatus: ControlPlaneUpgradeStatus{
+				ScheduledStart: &now,
+				Components: []ControlPlaneComponentStatus{
+					{Name: "etcd", Available: true},
+				},
+				Blockers: []string{"none"},
+			},
+			NodePoolStatuses: []NodePoolUpgradeStatus{
+				{Name: "pool1", Phase: "Upgrading", ScheduledStart: &now, Blockers: []string{"drain"}},
+			},
+		},
+	}
+
+	cp := hcu.DeepCopy()
+	g.Expect(cp).To(Equal(hcu))
+
+	cpObj := hcu.DeepCopyObject()
+	g.Expect(cpObj).NotTo(BeNil())
+
+	list := &HostedClusterUpgradeList{
+		Items: []HostedClusterUpgrade{*hcu},
+	}
+	listCp := list.DeepCopy()
+	g.Expect(listCp).To(Equal(list))
+
+	listObj := list.DeepCopyObject()
+	g.Expect(listObj).NotTo(BeNil())
 }
