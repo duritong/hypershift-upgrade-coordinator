@@ -24,7 +24,7 @@ The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifie
 
 ## 📋 Declarative Usage Example
 
-SREs simply commit a single manifest matching the target `HostedCluster` name and namespace to trigger a safe, babysat rollout:
+SREs simply commit a single manifest matching the target `HostedCluster` name and namespace to trigger a safe, observed rollout:
 
 ```yaml
 apiVersion: upgrade.0xshift.dev/v1alpha1
@@ -57,9 +57,9 @@ spec:
 
 ---
 
-## 👶 How the Coordinator Babysits the Upgrade Process
+## 👶 How the Coordinator Supervises the Upgrade Process
 
-Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 24/7 SRE babysitter, carrying the cluster safely through every stage of the lifecycle:
+Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 24/7 SRE superviser, carrying the cluster safely through every stage of the lifecycle:
 
 ```
 [Day 0: Apply CR] ──► [Preflight Gates] ──► [Scheduling Gate] ──► [Control Plane Rollout] ──► [Component Verification] ──► [Priority Serialized Rollout] ──► [Blocked Drain Log-Scraping] ──► [Verification & Completed]
@@ -81,7 +81,7 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
 5.  **Group-Serialized NodePool Rollouts:**
     *   Evaluates all associated NodePools, clustering them into spec-ordered rollout groups.
     *   Unpauses and upgrades groups sequentially, respecting your defined maximum parallelism limits.
-6.  **Troubleshooting & Drain Babysitting:**
+6.  **Troubleshooting & Drain Supervising:**
     *   If a node drain stalls, the coordinator **scrapes the logs** of the `hosted-cluster-config-operator` (HCCO) inside the control plane.
     *   It extracts exact Pod Disruption Budget (PDB) blockers and identifies the specific blocked host name, surfacing them directly in the CR status and Grafana.
 7.  **Final Verification & Sign-off:**

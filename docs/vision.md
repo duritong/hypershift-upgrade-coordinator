@@ -1,6 +1,6 @@
 # HyperShift Upgrade Coordinator: North Star Vision
 
-This document serves as the philosophical and operational "North Star" for all design, architectural, and implementation decisions for the HyperShift Upgrade Coordinator. It outlines the core realities of running massive fleet upgrades, our operational pillars, and how we measure success.
+This document serves as the vision for all design, architectural, and implementation decisions for the HyperShift Upgrade Coordinator. It outlines the core realities of running massive fleet upgrades, our operational pillars, and how we measure success.
 
 ---
 
@@ -12,7 +12,7 @@ Currently, upgrading a cluster is done by updating the `.spec.release.image` on 
 1. **The Verification Black Box:** There is a severe lack of structured validation, verification, and centralized observability during the rollout. Component rollouts and worker node drains happen asynchronously with minimal visibility.
 2. **Disruption Asymmetry:**
    - **Control Plane Upgrades** are potentially disruptive to management-plane components (e.g., cluster operators, controllers, APIs) but are typically **non-disruptive to end-user workloads**.
-   - **Worker Node Upgrades** (data plane) are **highly disruptive** to end-users because they require cordoning, draining, evicting pods, and rebooting or recreating physical/virtual machines.
+   - **Worker Node Upgrades** (data plane) are **disruptive** to end-users because they require cordoning, draining, evicting pods, and rebooting or recreating physical/virtual machines.
 3. **The GitOps Scheduling Dilemma:** SREs drive infrastructure via GitOps (declarative pull models). However, they cannot simply merge an upgrade pull request at 10:00 AM if they want worker nodes to roll out sequentially at 2:00 AM on consecutive nights. Merging must happen "Upfront" (Day 0), but execution must be precisely scheduled and metered.
 
 ---
@@ -51,6 +51,6 @@ Every feature, pull request, and refactoring effort must align with these four f
 
 Our design is successful if:
 1. An SRE can define a complex, 4-day staggered cluster upgrade in **one declarative pull request** and merge it safely during normal working hours.
-2. Any stuck node drain is surfaced via a Prometheus alert to the SRE pager **within 15 minutes** of becoming blocked, complete with the specific blocking pod details.
+2. Any stuck node drain is surfaced via a Prometheus alert to the SRE pager **within a certain time** of becoming blocked, complete with the specific blocking pod details.
 3. If an unexpected component failure occurs during the intermediate control plane upgrade, the state machine halts immediately, sounds an alert, and **never** touches the data plane (workers).
 4. SREs have a single, unified Grafana dashboard displaying the progress, target versions, and estimated completion times for hundreds of concurrent cluster upgrades across the fleet.
