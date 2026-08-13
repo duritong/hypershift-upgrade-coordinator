@@ -143,8 +143,12 @@ tests-offline: manifests generate fmt vet ## Run tests in offline/disconnected m
 
 ##@ Build
 
+.PHONY: scan
+scan: trivy ## Scan the codebase and dependencies with trivy for vulnerabilities.
+	$(TRIVY) fs --db-repository ghcr.io/aquasecurity/trivy-db:2 --skip-dirs tmp,vendor .
+
 .PHONY: build
-build: manifests generate fmt vet ## Build container image with the manager.
+build: manifests generate fmt vet scan ## Build container image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
 .PHONY: run
@@ -155,7 +159,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: test ## Build docker image with the manager.
+docker-build: test scan ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
 .PHONY: docker-push
@@ -214,10 +218,19 @@ KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
+TRIVY ?= $(LOCALBIN)/trivy
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.0.1
 CONTROLLER_TOOLS_VERSION ?= v0.17.1
+
+.PHONY: trivy
+trivy: $(TRIVY) ## Download trivy locally if necessary.
+$(TRIVY): $(LOCALBIN)
+	@if [ ! -s $(LOCALBIN)/trivy ]; then \
+		echo "Downloading trivy..."; \
+		curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b $(LOCALBIN); \
+	fi
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary. If wrong version is installed, it will be removed before downloading.
