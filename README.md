@@ -14,7 +14,7 @@ The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifie
 
 *   **Disruption-Aware Step Scheduling:** Schedule the control plane upgrade (non-disruptive to end-users) and the worker NodePool reboots (highly disruptive machine drains) to occur during completely separate maintenance windows.
 *   **Declarative EUS (Extended Update Support) Multi-Minor Jumps:** Declare a 2-minor version upgrade path (e.g., `4.12` -> `4.14` via EUS intermediate `4.13`) in a single field. The coordinator takes care of the sequential hops while keeping NodePools safely locked on the old version until the control plane reaches the final version.
-*   **Priority-Based Serialization:** Group worker NodePools into sequential upgrade phases using labels (`upgrade.huc.0xshift.dev/order`), enforcing that critical infrastructure nodes upgrade and verify before general compute nodes are touched.
+*   **Group-Based Ordered Rollouts:** Group worker NodePools into sequential upgrade phases using labels (`upgrade.huc.0xshift.dev/group`), enforcing that critical infrastructure nodes upgrade and verify before general compute nodes are touched.
 *   **Global Concurrency Limits:** Cap the number of NodePools allowed to roll out concurrently within a priority group (via `rolloutPolicy.maxParallelNodePools`) to preserve cluster capacity.
 *   **Granular Pause & Resume Support:** Features both coordinator-level pausing (via `pausedUntil`, which supports indefinite pausing with `"true"` or scheduled pausing with an RFC3339 timestamp) and object-level control using HyperShift's native `spec.pausedUntil` fields.
 *   **Least Privilege & Multi-Namespace Isolation:** Operates **without any cluster-wide permissions**. It takes a flag targeting a single HostedCluster namespace, allowing separate isolated controller instances to run concurrently on the same cluster for different tenants.
@@ -78,9 +78,9 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
 4.  **Control Plane Verification:**
     *   Queries low-level `ControlPlaneComponent` (CPC) resources (etcd, apiserver, etc.).
     *   Demands that **100% of components** are both `Available=True` and `RolloutComplete=True` before touching any worker nodes.
-5.  **Priority-Serialized NodePool Rollouts:**
-    *   Evaluates all associated NodePools, clustering them into serialized priority groups.
-    *   Unpauses and upgrades groups sequentially (lowest order first), respecting your defined maximum parallelism limits.
+5.  **Group-Serialized NodePool Rollouts:**
+    *   Evaluates all associated NodePools, clustering them into spec-ordered rollout groups.
+    *   Unpauses and upgrades groups sequentially, respecting your defined maximum parallelism limits.
 6.  **Troubleshooting & Drain Babysitting:**
     *   If a node drain stalls, the coordinator **scrapes the logs** of the `hosted-cluster-config-operator` (HCCO) inside the control plane.
     *   It extracts exact Pod Disruption Budget (PDB) blockers and identifies the specific blocked host name, surfacing them directly in the CR status and Grafana.
@@ -94,9 +94,9 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
 
 Detailed designs, guides, and specifications can be found in the `docs/` folder:
 
-* **[User Guide](docs/user-guide.md):** Comprehensive step-by-step instructions on operator installation, setup, triggering upgrades, configuring NodePool priorities, and troubleshooting blocked node drains.
+* **[User Guide](docs/user-guide.md):** Comprehensive step-by-step instructions on operator installation, setup, triggering upgrades, configuring NodePool groups, and troubleshooting blocked node drains.
 * **[North Star Vision](docs/vision.md):** Proactive SRE vision, core pillars (staggered scheduling, zero-trust verification, readiness dashboards), and operational context.
-* **[Architecture & Design Doc](docs/architecture.md):** Detailed explanation of the state machine scheduling gates, Extended Update Support (EUS) mechanics, label-based NodePool ordering, multi-namespace least-privilege security model, and pause/resume execution.
+* **[Architecture & Design Doc](docs/architecture.md):** Detailed explanation of the state machine scheduling gates, Extended Update Support (EUS) mechanics, group-based NodePool sequence unpausing, multi-namespace least-privilege security model, and pause/resume execution.
 * **[CRD Specification](docs/crd.md):** The Custom Resource schema (`HostedClusterUpgrade`), including API layout, struct definitions, and ArgoCD integration.
 * **[Monitoring & Alerting](docs/monitoring.md):** Specification of Prometheus alerts (`PrometheusRule` custom resources) and SRE Grafana dashboard layouts.
 
