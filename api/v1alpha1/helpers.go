@@ -26,7 +26,7 @@ import (
 )
 
 // ImagePattern matches: registry.domain.com/path:version-arch@sha256:digest
-var ImagePattern = regexp.MustCompile(`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_]+)?)@sha256:([a-fA-F0-9]{64})$`)
+var ImagePattern = regexp.MustCompile(`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?)@sha256:([a-fA-F0-9]{64})$`)
 
 // ParseVersionFromPullspec extracts the semantic version from the tag slice: <version>-<arch>
 func ParseVersionFromPullspec(pullspec string) (string, error) {
@@ -34,7 +34,7 @@ func ParseVersionFromPullspec(pullspec string) (string, error) {
 	if len(matches) < 4 {
 		return "", fmt.Errorf("invalid pullspec format: must match registry.domain.com/path:version-arch@sha256:digest")
 	}
-	tag := matches[3] // e.g. "4.20.44-x86_64"
+	tag := matches[3] // e.g. "4.20.44-x86_64", "4.16.0-rc.1-x86_64", "4.14.0"
 	idx := strings.Index(tag, "-")
 	if idx == -1 {
 		return tag, nil
@@ -49,7 +49,14 @@ func ExtractVersion(input string) (string, error) {
 	}
 
 	if strings.Contains(input, "@sha256:") || strings.Contains(input, "/") {
-		return ParseVersionFromPullspec(input)
+		v, err := ParseVersionFromPullspec(input)
+		if err != nil {
+			return "", err
+		}
+		if !semver.IsValid("v" + v) {
+			return "", fmt.Errorf("invalid semantic version extracted from pullspec: %s", v)
+		}
+		return v, nil
 	}
 
 	v := strings.TrimPrefix(input, "v")

@@ -25,7 +25,7 @@ type HostedClusterUpgradeSpec struct {
 	// TargetReleaseImage is the final desired OpenShift release payload image.
 	// Must match pattern: registry.domain.com/path:version-arch@sha256:digest
 	// +required
-	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
+	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?)@sha256:([a-fA-F0-9]{64})$`
 	TargetReleaseImage string `json:"targetReleaseImage"`
 
 	// IntermediateReleaseImage is the single optional OCP release payload image that the control plane
@@ -34,7 +34,7 @@ type HostedClusterUpgradeSpec struct {
 	// If omitted, the upgrade proceeds as a standard direct upgrade (e.g., 4.13 -> 4.14).
 	// Must match pattern: registry.domain.com/path:version-arch@sha256:digest
 	// +optional
-	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$`
+	// +kubebuilder:validation:Pattern=`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?)@sha256:([a-fA-F0-9]{64})$`
 	IntermediateReleaseImage string `json:"intermediateReleaseImage,omitempty"`
 
 	// PausedUntil can be used to pause reconciliation on this upgrade coordinator.
@@ -52,8 +52,9 @@ type HostedClusterUpgradeSpec struct {
 
 	// NodePoolGroups lists the sequential rollout groups and their maintenance window start schedules.
 	// First groups in this list upgrade first. Un-labeled NodePools belong to the "default" group.
-	// +required
-	NodePoolGroups []NodePoolGroupSpec `json:"nodePoolGroups"`
+	// +optional
+	// +listType=atomic
+	NodePoolGroups []NodePoolGroupSpec `json:"nodePoolGroups,omitempty"`
 
 	// RolloutPolicy defines global constraints on the upgrade execution.
 	// +optional

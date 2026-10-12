@@ -27,14 +27,11 @@ The Hypershift Upgrade Coordinator is a fleet-level orchestration controller tha
      $$\text{Current Cluster Version} < \text{Intermediate Version} < \text{Target Version}$$
      If any segment of the upgrade path represents a downgrade or a lateral shift (same version), the webhook rejects the CR, and the controller's preflight gate blocks reconciliation. In case of issues requiring manual repair or overrides, the SRE escape hatch is to pause the coordinator (`spec.pausedUntil: "true"`) and directly adjust the objects.
 8. **Coaligned Naming Convention (No Cluster Reference):** To eliminate redundant configuration and enforce a direct 1:1 relation, a `HostedClusterUpgrade` CR **must share the exact same name** as the target `HostedCluster` in its namespace. A validating admission webhook ensures this constraint and prevents orphan coordinators.
-9. **Least Privilege & Multi-Namespace Isolation (SRE GitOps RBAC Model):**
-   To strictly secure enterprise management clusters, the coordinator operates **without any cluster-wide permissions** (no global read/write ClusterRoleBindings).
-   - **Target Namespace Flag:** The operator takes a `--hosted-cluster-namespace` flag (defaulting to `clusters`) to specify which namespace it manages.
-   - **Dynamic CP Namespace Resolution:** When coordinating a cluster named `<cluster_name>` located in the hosted cluster namespace `<hc_namespace>`, the coordinator expects its control plane components to reside in `<hc_namespace>-<cluster_name>`.
-   - **GitOps-Integrated RBAC Scoping:**
-     - The coordinator has a single local `RoleBinding` in the `clusters` namespace mapping it to a `ClusterRole` granting permission to read/write `HostedClusters` and `NodePools`.
-     - In each individual `<hc_namespace>-<cluster_name>` control plane namespace, SREs include a local `RoleBinding` inside their cluster GitOps template folder. This binds the coordinator's `ServiceAccount` to a read-only `ClusterRole` granting access to read `ControlPlaneComponent` status and HCCO pod logs/events.
-     - This delivers absolute tenant security isolation with zero cluster-admin permissions and negligible GitOps templating overhead.
+9. **Fleet-Level Cluster Architecture & RBAC Scoping:**
+   Aligning with native OpenShift and HyperShift operators (such as the HyperShift Operator, MCE, and ACM), the coordinator runs as a cluster-scoped fleet operator on the trusted management cluster plane:
+   - **Cluster-Scoped Informers & Dynamic HCP Namespaces:** Because HyperShift dynamically creates new control plane namespaces (`<hc_namespace>-<cluster_name>`) at runtime as new hosted clusters are provisioned, the coordinator uses cluster-scoped RBAC (`ClusterRole` + `ClusterRoleBinding`) to watch and reconcile `HostedClusters`, `NodePools`, and `ControlPlaneComponents` across all dynamically generated namespaces without requiring per-cluster local RBAC templating or controller restarts.
+   - **Target Namespace Filter Flag:** The operator supports an optional `--hosted-cluster-namespace` flag (defaulting to all namespaces when empty, or targeted to a specific namespace such as `clusters`) for environments where an SRE team wants to restrict reconciliation to a designated namespace.
+   - **Centralized Fleet Operations:** Deploying as a fleet operator eliminates the operational overhead of running $N$ independent controller deployments, leases, and Prometheus endpoints across tenant namespaces, providing a single control plane for fleet-wide upgrades.
 10. **Disruption-Aware Scheduling & Sequential Rollouts:**
     SREs can configure upgrades to execute either as immediate sequential steps, as staggered scheduled steps, or as a mixture of both:
     - **Omitted `StartAt` (Immediate Fallback):** If `StartAt` is omitted or `nil` on any step, the state machine treats the scheduling check as "always satisfied" and immediately proceeds once its prior dependencies are verified.

@@ -33,11 +33,7 @@ import (
 // log is for logging in this package.
 var hostedclusterupgradelog = logf.Log.WithName("hostedclusterupgrade-resource")
 
-// webhookClient is set up inside SetupWebhookWithManager to allow unstructured API server queries.
-var webhookClient client.Client
-
 func (r *HostedClusterUpgrade) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	webhookClient = mgr.GetClient()
 	return ctrl.NewWebhookManagedBy(mgr, &HostedClusterUpgrade{}).
 		WithValidator(&HostedClusterUpgradeCustomValidator{Client: mgr.GetClient()}).
 		Complete()
@@ -61,7 +57,18 @@ func (v *HostedClusterUpgradeCustomValidator) ValidateCreate(ctx context.Context
 // ValidateUpdate implements admission.Validator so a webhook will be registered for the type
 func (v *HostedClusterUpgradeCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *HostedClusterUpgrade) (admission.Warnings, error) {
 	hostedclusterupgradelog.Info("validate update", "name", newObj.Name)
-	return nil, v.validateUpgradeSpec(ctx, newObj)
+	// NodePool Group-Level Chronological Consistency Check must always hold
+	if err := validateNodePoolGroupSchedule(newObj.Spec.NodePoolGroups); err != nil {
+		return nil, err
+	}
+
+	// Only validate version progression when target or intermediate release images are modified
+	if oldObj.Spec.TargetReleaseImage != newObj.Spec.TargetReleaseImage ||
+		oldObj.Spec.IntermediateReleaseImage != newObj.Spec.IntermediateReleaseImage {
+		return nil, v.validateUpgradeSpec(ctx, newObj)
+	}
+
+	return nil, nil
 }
 
 // ValidateDelete implements admission.Validator so a webhook will be registered for the type
@@ -70,12 +77,29 @@ func (v *HostedClusterUpgradeCustomValidator) ValidateDelete(ctx context.Context
 	return nil, nil
 }
 
+func validateNodePoolGroupSchedule(groups []NodePoolGroupSpec) error {
+	for i := 0; i < len(groups); i++ {
+		for j := i + 1; j < len(groups); j++ {
+			grpA := groups[i]
+			grpB := groups[j]
+
+			if grpA.StartAt == nil || grpB.StartAt == nil {
+				continue
+			}
+
+			if grpB.StartAt.Before(grpA.StartAt) {
+				return fmt.Errorf("temporal schedule inconsistency: NodePoolGroup '%s' (position %d) is scheduled to upgrade at '%s', which is earlier than priority-higher group '%s' (position %d) scheduled at '%s'",
+					grpB.Name, j, grpB.StartAt.Time.Format(time.RFC3339),
+					grpA.Name, i, grpA.StartAt.Time.Format(time.RFC3339))
+			}
+		}
+	}
+	return nil
+}
+
 // validateUpgradeSpec aggregates our core SRE API safety validation gates.
 func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Context, r *HostedClusterUpgrade) error {
 	cli := v.Client
-	if cli == nil {
-		cli = webhookClient
-	}
 	if cli == nil {
 		// Skip validation if client is not initialized (e.g. during standalone unit tests)
 		return nil
@@ -93,14 +117,30 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 		return fmt.Errorf("failed to verify target HostedCluster: %v", err)
 	}
 
-	// 2. Extract current version from the HostedCluster status or spec.
+	// 2. Extract current version from the HostedCluster status or spec (preferring Completed history entry).
 	var currentRelease string
 	history, found, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
 	if found && len(history) > 0 {
-		if hMap, ok := history[0].(map[string]interface{}); ok {
-			currentRelease, _ = hMap["image"].(string)
-			if currentRelease == "" {
-				currentRelease, _ = hMap["version"].(string)
+		for _, item := range history {
+			hMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			state, _ := hMap["state"].(string)
+			if state == "Completed" {
+				currentRelease, _ = hMap["image"].(string)
+				if currentRelease == "" {
+					currentRelease, _ = hMap["version"].(string)
+				}
+				break
+			}
+		}
+		if currentRelease == "" {
+			if hMap, ok := history[0].(map[string]interface{}); ok {
+				currentRelease, _ = hMap["image"].(string)
+				if currentRelease == "" {
+					currentRelease, _ = hMap["version"].(string)
+				}
 			}
 		}
 	}
@@ -146,63 +186,54 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 		return err
 	}
 
+	// Target must always be strictly greater than current version
+	if !IsUpstreamGreater(currentVersion, targetVersion) {
+		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
+	}
+	if currMajor != tgtMajor {
+		return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, tgtMajor)
+	}
+
+	// Check if intermediate is specified and whether it is ahead of currentVersion or should be skipped
 	if intermediateVersion != "" {
 		intMajor, intMinor, err := GetMajorMinor(intermediateVersion)
 		if err != nil {
 			return err
 		}
 
-		// First step: Current -> Intermediate
-		if !IsUpstreamGreater(currentVersion, intermediateVersion) {
-			return fmt.Errorf("invalid version progression: intermediate version '%s' is not strictly greater than current version '%s'", intermediateVersion, currentVersion)
-		}
-		if currMajor != intMajor {
-			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, intMajor)
-		}
-		if intMinor-currMinor > 1 {
-			return fmt.Errorf("invalid minor version jump: intermediate version '%s' is more than 1 minor version ahead of current version '%s'", intermediateVersion, currentVersion)
-		}
+		if IsUpstreamGreater(currentVersion, intermediateVersion) {
+			// Intermediate is ahead of current: regular EUS multi-hop
+			if currMajor != intMajor {
+				return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, intMajor)
+			}
+			if intMinor-currMinor > 1 {
+				return fmt.Errorf("invalid minor version jump: intermediate version '%s' is more than 1 minor version ahead of current version '%s'", intermediateVersion, currentVersion)
+			}
 
-		// Second step: Intermediate -> Target
-		if !IsUpstreamGreater(intermediateVersion, targetVersion) {
-			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than intermediate version '%s'", targetVersion, intermediateVersion)
-		}
-		if intMajor != tgtMajor {
-			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", intMajor, tgtMajor)
-		}
-		if tgtMinor-intMinor > 1 {
-			return fmt.Errorf("invalid minor version jump: target version '%s' is more than 1 minor version ahead of intermediate version '%s'", targetVersion, intermediateVersion)
+			// Second step: Intermediate -> Target
+			if !IsUpstreamGreater(intermediateVersion, targetVersion) {
+				return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than intermediate version '%s'", targetVersion, intermediateVersion)
+			}
+			if intMajor != tgtMajor {
+				return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", intMajor, tgtMajor)
+			}
+			if tgtMinor-intMinor > 1 {
+				return fmt.Errorf("invalid minor version jump: target version '%s' is more than 1 minor version ahead of intermediate version '%s'", targetVersion, intermediateVersion)
+			}
+		} else {
+			// Cluster is already at or past intermediate: Skip intermediate behavior
+			// In skip mode, target cannot be more than 1 minor version ahead of current
+			if tgtMinor-currMinor > 1 {
+				return fmt.Errorf("unsupported direct multi-minor jump: target version '%s' is more than 1 minor version ahead of current version '%s'", targetVersion, currentVersion)
+			}
 		}
 	} else {
 		// Direct step: Current -> Target
-		if !IsUpstreamGreater(currentVersion, targetVersion) {
-			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
-		}
-		if currMajor != tgtMajor {
-			return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, tgtMajor)
-		}
 		if tgtMinor-currMinor > 1 {
 			return fmt.Errorf("unsupported direct multi-minor jump: target version '%s' is more than 1 minor version ahead of current version '%s'. You must specify a singular intermediateReleaseImage for EUS hops (at most 2 minor versions overall).", targetVersion, currentVersion)
 		}
 	}
 
 	// 5. NodePool Group-Level Chronological Consistency Check
-	for i := 0; i < len(r.Spec.NodePoolGroups); i++ {
-		for j := i + 1; j < len(r.Spec.NodePoolGroups); j++ {
-			grpA := r.Spec.NodePoolGroups[i]
-			grpB := r.Spec.NodePoolGroups[j]
-
-			if grpA.StartAt == nil || grpB.StartAt == nil {
-				continue
-			}
-
-			if grpB.StartAt.Before(grpA.StartAt) {
-				return fmt.Errorf("temporal schedule inconsistency: NodePoolGroup '%s' (position %d) is scheduled to upgrade at '%s', which is earlier than priority-higher group '%s' (position %d) scheduled at '%s'",
-					grpB.Name, j, grpB.StartAt.Time.Format(time.RFC3339),
-					grpA.Name, i, grpA.StartAt.Time.Format(time.RFC3339))
-			}
-		}
-	}
-
-	return nil
+	return validateNodePoolGroupSchedule(r.Spec.NodePoolGroups)
 }

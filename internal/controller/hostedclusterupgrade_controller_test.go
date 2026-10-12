@@ -722,6 +722,11 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			_ = unstructured.SetNestedSlice(fetchedHC.Object, history, "status", "version", "history")
 			Expect(k8sClient.Status().Update(ctx, fetchedHC)).To(Succeed())
 
+			// Simulate ControlPlaneComponent (etcd) completing rollout to intermediate 4.13.0
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "etcd", Namespace: cpNamespace}, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, "4.13.0", "status", "version")
+			Expect(k8sClient.Status().Update(ctx, uCPC)).To(Succeed())
+
 			// Step 2: Coordinator should advance to target version (4.14.0)
 			Eventually(func() string {
 				fetchedHC2 := &unstructured.Unstructured{}
@@ -805,6 +810,424 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				return fetched.Status.Phase
 			}, timeout, interval).Should(Equal(upgradev1alpha1.PhaseBlocked))
+		})
+
+		It("Issue 1.1: should not mark ControlPlaneComponent verified if component reports old version despite Available and RolloutComplete", func() {
+			clusterName := "cpc-ver-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+			cpNamespace := fmt.Sprintf("%s-%s", namespace, clusterName)
+
+			ns := &unstructured.Unstructured{}
+			ns.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"})
+			ns.SetName(cpNamespace)
+			_ = k8sClient.Create(ctx, ns)
+			defer func() { _ = k8sClient.Delete(ctx, ns) }()
+
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			// Create CPC with Available=True, RolloutComplete=True, but version="4.20.44" (old version)
+			uCPC := &unstructured.Unstructured{}
+			uCPC.SetGroupVersionKind(gvkCPC)
+			uCPC.SetName("kube-apiserver")
+			uCPC.SetNamespace(cpNamespace)
+			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, uCPC) }()
+
+			_ = unstructured.SetNestedField(uCPC.Object, "4.20.44", "status", "version")
+			nowStr := time.Now().Format(time.RFC3339)
+			conds := []interface{}{
+				map[string]interface{}{"type": "Available", "status": "True", "reason": "Ready", "message": "Ready", "lastTransitionTime": nowStr},
+				map[string]interface{}{"type": "RolloutComplete", "status": "True", "reason": "Ready", "message": "Ready", "lastTransitionTime": nowStr},
+			}
+			_ = unstructured.SetNestedSlice(uCPC.Object, conds, "status", "conditions")
+			Expect(k8sClient.Status().Update(ctx, uCPC)).To(Succeed())
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Coordinator should apply 4.20.50 on HostedCluster and move to VerifyingControlPlane
+			Eventually(func() upgradev1alpha1.UpgradePhase {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return ""
+				}
+				return fetched.Status.Phase
+			}, timeout, interval).Should(Equal(upgradev1alpha1.PhaseVerifyingControlPlane))
+
+			// Verify that UpgradedComponents is 0 (NOT 1!) because kube-apiserver is still on 4.20.44
+			Eventually(func() int32 {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return -1
+				}
+				return fetched.Status.ControlPlaneStatus.UpgradedComponents
+			}, timeout, interval).Should(Equal(int32(0)))
+
+			// Simulate kube-apiserver completing rollout to 4.20.50
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kube-apiserver", Namespace: cpNamespace}, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, "4.20.50", "status", "version")
+			Expect(k8sClient.Status().Update(ctx, uCPC)).To(Succeed())
+
+			// Simulate HostedCluster status reaching 4.20.50
+			Expect(k8sClient.Get(ctx, hcuKey, uHC)).To(Succeed())
+			history := []interface{}{
+				map[string]interface{}{
+					"image":          "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"version":        "4.20.50",
+					"state":          "Completed",
+					"verified":       true,
+					"startedTime":    nowStr,
+					"completionTime": nowStr,
+				},
+			}
+			_ = unstructured.SetNestedSlice(uHC.Object, history, "status", "version", "history")
+			Expect(k8sClient.Status().Update(ctx, uHC)).To(Succeed())
+
+			// Now UpgradedComponents must become 1 and CP upgrade advances!
+			Eventually(func() int32 {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return -1
+				}
+				return fetched.Status.ControlPlaneStatus.UpgradedComponents
+			}, timeout, interval).Should(Equal(int32(1)))
+		})
+
+		It("Issue 1.2: should enter PhaseInstalling when HostedCluster history has only Partial installation entry", func() {
+			clusterName := "installing-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+
+			hc := &unstructured.Unstructured{}
+			hc.SetGroupVersionKind(gvkHC)
+			hc.SetName(clusterName)
+			hc.SetNamespace(namespace)
+			_ = unstructured.SetNestedField(hc.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
+			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
+			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"name": "pull-secret"}, "spec", "pullSecret")
+			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"managementType": "Managed", "managed": map[string]interface{}{"storage": map[string]interface{}{"type": "PersistentVolume"}}}, "spec", "etcd")
+			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{
+				"clusterNetwork": []interface{}{map[string]interface{}{"cidr": "10.128.0.0/14"}},
+				"serviceNetwork": []interface{}{map[string]interface{}{"cidr": "172.30.0.0/16"}},
+				"networkType":    "OVNKubernetes",
+			}, "spec", "networking")
+			services := []interface{}{
+				map[string]interface{}{"service": "APIServer", "servicePublishingStrategy": map[string]interface{}{"type": "LoadBalancer"}},
+				map[string]interface{}{"service": "OAuthServer", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+				map[string]interface{}{"service": "Konnectivity", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+				map[string]interface{}{"service": "Ignition", "servicePublishingStrategy": map[string]interface{}{"type": "Route"}},
+			}
+			_ = unstructured.SetNestedSlice(hc.Object, services, "spec", "services")
+			Expect(k8sClient.Create(ctx, hc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hc) }()
+
+			// Initial installation: history has 1 entry with state: "Partial" (no Completed entry!)
+			nowStr := time.Now().Format(time.RFC3339)
+			history := []interface{}{
+				map[string]interface{}{
+					"image":          "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"version":        "4.20.44",
+					"state":          "Partial",
+					"verified":       false,
+					"startedTime":    nowStr,
+					"completionTime": nowStr,
+				},
+			}
+			desired := map[string]interface{}{
+				"image":   "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+				"version": "4.20.44",
+			}
+			_ = unstructured.SetNestedMap(hc.Object, desired, "status", "version", "desired")
+			_ = unstructured.SetNestedSlice(hc.Object, history, "status", "version", "history")
+			_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
+			_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
+			Expect(k8sClient.Status().Update(ctx, hc)).To(Succeed())
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Coordinator MUST transition to PhaseInstalling (and NOT start upgrading!)
+			Eventually(func() upgradev1alpha1.UpgradePhase {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return ""
+				}
+				return fetched.Status.Phase
+			}, timeout, interval).Should(Equal(upgradev1alpha1.PhaseInstalling))
+		})
+
+		It("Issue 1.3: should not deadlock when NodePools have empty pausedUntil and rollout according to maxParallelNodePools", func() {
+			clusterName := "concurrency-test-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+
+			// Cluster at target version so CP upgrade is bypassed
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			// Create 2 NodePools with pausedUntil: "" (not paused initially!)
+			np1 := createAndSetStatusNodePool(ctx, "c-pool-1", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, np1) }()
+
+			np2 := createAndSetStatusNodePool(ctx, "c-pool-2", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, np2) }()
+
+			// Create HCU with maxParallelNodePools: 1
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					RolloutPolicy: &upgradev1alpha1.RolloutPolicySpec{
+						MaxParallelNodePools: 1,
+					},
+					NodePoolGroups: []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Verify that exactly ONE pool is Upgrading, and the other is WaitingForConcurrency (no deadlock!)
+			Eventually(func() map[string]string {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return nil
+				}
+				phases := make(map[string]string)
+				for _, s := range fetched.Status.NodePoolStatuses {
+					phases[s.Name] = s.Phase
+				}
+				return phases
+			}, timeout, interval).Should(Satisfy(func(phases map[string]string) bool {
+				upgradingCount := 0
+				waitingCount := 0
+				for _, p := range phases {
+					if p == "Upgrading" {
+						upgradingCount++
+					}
+					if p == "WaitingForConcurrency" {
+						waitingCount++
+					}
+				}
+				return upgradingCount == 1 && waitingCount == 1
+			}))
+		})
+
+		It("Issue 1.4: should not mark NodePool Completed if nodes are unready despite updated replicas", func() {
+			clusterName := "unready-pool-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			// NodePool where spec is already target release, but readyNodeCount is 0!
+			np := createAndSetStatusNodePool(ctx, "unready-pool", namespace, clusterName, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			_ = unstructured.SetNestedField(np.Object, int64(3), "status", "replicas")
+			nodesInfo := map[string]interface{}{
+				"nodeVersions": []interface{}{
+					map[string]interface{}{
+						"ocpVersion":       "4.22.0",
+						"kubeletVersion":   "v1.28.0",
+						"readyNodeCount":   int64(0), // 0 ready!
+						"unreadyNodeCount": int64(3), // 3 unready!
+					},
+				},
+			}
+			_ = unstructured.SetNestedMap(np.Object, nodesInfo, "status", "nodesInfo")
+			Expect(k8sClient.Status().Update(ctx, np)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, np) }()
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Pool MUST NOT be Completed! It should be Upgrading.
+			Consistently(func() string {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return ""
+				}
+				for _, s := range fetched.Status.NodePoolStatuses {
+					if s.Name == "unready-pool" {
+						return s.Phase
+					}
+				}
+				return ""
+			}, time.Second*3, interval).ShouldNot(Equal("Completed"))
+		})
+
+		It("Issue 1.5: should lock all NodePools (spec.pausedUntil=true) during Control Plane upgrade", func() {
+			clusterName := "lock-np-cluster"
+
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			// Create NodePool with pausedUntil: "false"
+			np := createAndSetStatusNodePool(ctx, "lock-target-pool", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
+			Expect(k8sClient.Update(ctx, np)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, np) }()
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// During Preflight/CP upgrade, NodePool spec.pausedUntil MUST be set to "true"!
+			Eventually(func() string {
+				fetchedNP := &unstructured.Unstructured{}
+				fetchedNP.SetGroupVersionKind(gvkNP)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "lock-target-pool", Namespace: namespace}, fetchedNP)
+				pUntil, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "pausedUntil")
+				return pUntil
+			}, timeout, interval).Should(Equal("true"))
+		})
+
+		It("Issue 3.3: should set standard GitOps Conditions (Ready, Progressing, Failing)", func() {
+			clusterName := "conditions-test-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Verify that Status.Conditions has Ready, Progressing, and Failing
+			Eventually(func() bool {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return false
+				}
+				hasReady := false
+				hasProg := false
+				hasFail := false
+				for _, c := range fetched.Status.Conditions {
+					if c.Type == "Ready" {
+						hasReady = true
+					}
+					if c.Type == "Progressing" {
+						hasProg = true
+					}
+					if c.Type == "Failing" {
+						hasFail = true
+					}
+				}
+				return hasReady && hasProg && hasFail
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("Issue 3.5: should block when ClusterVersionFailing is True or ClusterVersionUpgradeable is False", func() {
+			clusterName := "cv-failing-cluster"
+			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
+
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+
+			// Set ClusterVersionFailing = True condition on HostedCluster
+			conds := []interface{}{
+				map[string]interface{}{
+					"type":               "ClusterVersionFailing",
+					"status":             "True",
+					"reason":             "CVOFailure",
+					"message":            "ClusterOperatorAuthenticationDegraded",
+					"lastTransitionTime": time.Now().Format(time.RFC3339),
+				},
+			}
+			_ = unstructured.SetNestedSlice(uHC.Object, conds, "status", "conditions")
+			Expect(k8sClient.Status().Update(ctx, uHC)).To(Succeed())
+
+			hcu := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
+					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
+
+			// Verify coordinator transitions to PhaseBlocked
+			Eventually(func() upgradev1alpha1.UpgradePhase {
+				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
+					return ""
+				}
+				return fetched.Status.Phase
+			}, timeout, interval).Should(Equal(upgradev1alpha1.PhaseBlocked))
+		})
+
+		It("Issue 3.1: should safely handle KubeLogScraper with nil client, deduplicate and bound log blockers to 10 entries", func() {
+			// 1. KubeLogScraper with nil client returns error
+			nilScraper := &KubeLogScraper{Client: nil}
+			_, err := nilScraper.GetHCCOLogs(ctx, "test-ns", "test-pod")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("kubernetes client is nil"))
+
+			// 2. Test scrapeHCCOLogsForDrains deduplication and bounding to 10 items
+			r := &HostedClusterUpgradeReconciler{
+				LogScraper: &DefaultMockLogScraper{
+					MockLogs: `failed to drain node worker-1
+cannot evict pod app-1 due to PDB app-pdb
+cannot evict pod app-1 due to PDB app-pdb
+cannot evict pod app-2 due to PDB app-pdb
+cannot evict pod app-3 due to PDB app-pdb
+cannot evict pod app-4 due to PDB app-pdb
+cannot evict pod app-5 due to PDB app-pdb
+cannot evict pod app-6 due to PDB app-pdb
+cannot evict pod app-7 due to PDB app-pdb
+cannot evict pod app-8 due to PDB app-pdb
+cannot evict pod app-9 due to PDB app-pdb
+cannot evict pod app-10 due to PDB app-pdb
+cannot evict pod app-11 due to PDB app-pdb
+cannot evict pod app-12 due to PDB app-pdb`,
+				},
+			}
+
+			blockers := r.scrapeHCCOLogsForDrains(ctx, "clusters", "my-cluster", "workers")
+			// Must be capped at exactly 10 items (not 14!)
+			Expect(len(blockers)).To(Equal(10))
+			// Must contain deduplicated items
+			Expect(blockers[0]).To(Equal("failed to drain node worker-1"))
+			Expect(blockers[1]).To(Equal("cannot evict pod app-1 due to PDB app-pdb"))
+			Expect(blockers[2]).To(Equal("cannot evict pod app-2 due to PDB app-pdb"))
 		})
 	})
 })

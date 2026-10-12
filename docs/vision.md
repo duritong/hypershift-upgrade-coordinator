@@ -41,9 +41,9 @@ Every feature, pull request, and refactoring effort must align with these four f
 * **Guideline:** SREs must never ask "what is the coordinator doing?" The CR status and Prometheus metrics must explicitly communicate current status, active blockers, and upcoming actions.
 * **Execution:** The coordinator must continuously compute and report "Step Readiness." If the control plane is finished but NodePool 1 is waiting for its scheduled window, the status must clearly report: `Phase: UpgradingNodePools`, `Message: Control Plane upgrade verified. NodePool 'infra-pool' is waiting for its scheduled window which opens on 2026-08-13T02:00:00Z (in 14 hours).`
 
-### IV. Least-Privilege Tenant Isolation
-* **Principle:** Fleet management must not compromise the security plane.
-* **Guideline:** The coordinator must avoid cluster-wide admin privileges. It operates in a namespace-scoped manner, allowing secure, multi-tenant execution where separate SRE teams can run isolated coordinator instances side-by-side on the same management cluster.
+### IV. Centralized Fleet-Level Architecture
+* **Principle:** Fleet management must scale dynamically with cluster lifecycle without operational friction.
+* **Guideline:** The coordinator operates as a cluster-scoped fleet manager on the management cluster plane. As new clusters and their associated dynamic control plane namespaces are provisioned at runtime, the coordinator automatically discovers and manages their upgrade lifecycles with zero per-cluster RBAC templating overhead. SREs can optionally restrict management scope via a namespace filter flag when operating in partitioned environments.
 
 ---
 

@@ -17,7 +17,7 @@ The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifie
 *   **Group-Based Ordered Rollouts:** Group worker NodePools into sequential upgrade phases using labels (`upgrade.huc.0xshift.dev/group`), enforcing that critical infrastructure nodes upgrade and verify before general compute nodes are touched.
 *   **Global Concurrency Limits:** Cap the number of NodePools allowed to roll out concurrently within a priority group (via `rolloutPolicy.maxParallelNodePools`) to preserve cluster capacity.
 *   **Granular Pause & Resume Support:** Features both coordinator-level pausing (via `pausedUntil`, which supports indefinite pausing with `"true"` or scheduled pausing with an RFC3339 timestamp) and object-level control using HyperShift's native `spec.pausedUntil` fields.
-*   **Least Privilege & Multi-Namespace Isolation:** Operates **without any cluster-wide permissions**. It takes a flag targeting a single HostedCluster namespace, allowing separate isolated controller instances to run concurrently on the same cluster for different tenants.
+*   **Fleet-Wide Management & Dynamic Namespace Discovery:** Operates as a cluster-scoped fleet controller on the management cluster, automatically managing upgrades across dynamically provisioned clusters and their control planes, with optional namespace filtering via `--hosted-cluster-namespace`.
 *   **GitOps & ArgoCD Friendly:**  Upgrades can be merged upfront on Day 0 via GitOps, but executed staggered on Day 1 (non-disruptive Control Plane upgrade) and consecutive nights (disruptive worker NodePool reboots).
 
 ---
@@ -47,11 +47,11 @@ spec:
   rolloutPolicy:
     maxParallelNodePools: 1
 
-  # Chronological start windows for individual NodePools
-  nodePools:
-    - name: workers-us-east-1a
+  # Chronological start windows for NodePool rollout groups
+  nodePoolGroups:
+    - name: infra
       startAt: "2026-08-15T04:00:00Z"
-    - name: workers-us-east-1b
+    - name: compute
       startAt: "2026-08-15T05:00:00Z"
 ```
 

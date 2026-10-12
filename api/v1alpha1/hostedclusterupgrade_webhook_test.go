@@ -263,6 +263,100 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("invalid-image-format"))
 		})
+
+		It("Issue 2.1: should allow updating HostedClusterUpgrade when cluster has reached target version", func() {
+			clusterName := "progressed-cluster"
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			err := k8sClient.Create(context.Background(), hc)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hc) }()
+
+			hcu := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: clusterName},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePoolGroups:     []NodePoolGroupSpec{},
+					ControlPlane:       ControlPlaneUpgradeSpec{},
+				},
+			}
+			err = k8sClient.Create(context.Background(), hcu)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hcu) }()
+
+			// Simulate cluster upgrade completion: HostedCluster now reports 4.21.0
+			nowStr := time.Now().Format(time.RFC3339)
+			history := []interface{}{
+				map[string]interface{}{
+					"image":          "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"version":        "4.21.0",
+					"state":          "Completed",
+					"verified":       true,
+					"startedTime":    nowStr,
+					"completionTime": nowStr,
+				},
+			}
+			desired := map[string]interface{}{
+				"image":   "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+				"version": "4.21.0",
+			}
+			_ = unstructured.SetNestedMap(hc.Object, desired, "status", "version", "desired")
+			_ = unstructured.SetNestedSlice(hc.Object, history, "status", "version", "history")
+			_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
+			_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
+			Expect(k8sClient.Status().Update(context.Background(), hc)).To(Succeed())
+
+			// Update HostedClusterUpgrade (e.g. setting pausedUntil: "true")
+			// Webhook MUST NOT reject this with "target version '4.21.0' is not strictly greater than current version '4.21.0'"
+			pausedVal := "true"
+			hcu.Spec.PausedUntil = &pausedVal
+			err = k8sClient.Update(context.Background(), hcu)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Issue 2.2: should allow skip behavior when cluster is already at or past intermediate version", func() {
+			clusterName := "skip-intermediate-cluster"
+			// Cluster is already at 4.21.0
+			hc := createMockHostedCluster(clusterName, nsName, "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			nowStr := time.Now().Format(time.RFC3339)
+			history := []interface{}{
+				map[string]interface{}{
+					"image":          "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"version":        "4.21.0",
+					"state":          "Completed",
+					"verified":       true,
+					"startedTime":    nowStr,
+					"completionTime": nowStr,
+				},
+			}
+			desired := map[string]interface{}{
+				"image":   "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+				"version": "4.21.0",
+			}
+			_ = unstructured.SetNestedMap(hc.Object, desired, "status", "version", "desired")
+			_ = unstructured.SetNestedSlice(hc.Object, history, "status", "version", "history")
+			_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
+			_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
+			err := k8sClient.Create(context.Background(), hc)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Status().Update(context.Background(), hc)).To(Succeed())
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hc) }()
+
+			// SRE applies CR specifying intermediate 4.21.0 and target 4.22.0
+			// Webhook must allow this skip intermediate configuration without rejecting it!
+			hcu := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: clusterName},
+				Spec: HostedClusterUpgradeSpec{
+					TargetReleaseImage:       "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					IntermediateReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					NodePoolGroups:           []NodePoolGroupSpec{},
+					ControlPlane:             ControlPlaneUpgradeSpec{},
+				},
+			}
+			err = k8sClient.Create(context.Background(), hcu)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = k8sClient.Delete(context.Background(), hcu) }()
+		})
 	})
 })
 

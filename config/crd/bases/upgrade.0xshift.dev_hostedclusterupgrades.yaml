@@ -84,7 +84,7 @@ spec:
                   Used for EUS (Extended Update Support) intermediate hops (e.g., 4.12 -> 4.13 -> 4.14).
                   If omitted, the upgrade proceeds as a standard direct upgrade (e.g., 4.13 -> 4.14).
                   Must match pattern: registry.domain.com/path:version-arch@sha256:digest
-                pattern: ^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$
+                pattern: ^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?)@sha256:([a-fA-F0-9]{64})$
                 type: string
               nodePoolGroups:
                 description: |-
@@ -109,6 +109,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               pausedUntil:
                 description: |-
                   PausedUntil can be used to pause reconciliation on this upgrade coordinator.
@@ -133,11 +134,10 @@ spec:
                 description: |-
                   TargetReleaseImage is the final desired OpenShift release payload image.
                   Must match pattern: registry.domain.com/path:version-arch@sha256:digest
-                pattern: ^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_]+)@sha256:([a-fA-F0-9]{64})$
+                pattern: ^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?)@sha256:([a-fA-F0-9]{64})$
                 type: string
             required:
             - controlPlane
-            - nodePoolGroups
             - targetReleaseImage
             type: object
           status:

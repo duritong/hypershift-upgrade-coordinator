@@ -24,11 +24,9 @@ spec:
   rolloutPolicy:
     maxParallelNodePools: 2
 
-  # Sequential, offset maintenance windows for worker NodePools
-  nodePools:
-    - name: infra-pool
+  # Sequential, offset maintenance windows for worker NodePool groups
+  nodePoolGroups:
+    - name: infra
       startAt: "2026-08-15T04:00:00Z"
-    - name: workers-us-east-1a
-      startAt: "2026-08-15T05:00:00Z"
-    - name: workers-us-east-1b
+    - name: compute
       startAt: "2026-08-15T05:00:00Z"

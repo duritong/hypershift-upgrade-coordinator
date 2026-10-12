@@ -41,6 +41,16 @@ func TestParseVersionFromPullspec(t *testing.T) {
 	g.Expect(errNoDash).NotTo(HaveOccurred())
 	g.Expect(vNoDash).To(Equal("4.14.0"))
 
+	// Valid pullspec with release candidate tag (Issue 2.3)
+	vRC, errRC := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-rc.1-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errRC).NotTo(HaveOccurred())
+	g.Expect(vRC).To(Equal("4.16.0"))
+
+	// Valid pullspec with nightly tag (Issue 2.3)
+	vNightly, errNightly := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-0.nightly-2024-10-12-044234@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errNightly).NotTo(HaveOccurred())
+	g.Expect(vNightly).To(Equal("4.16.0"))
+
 	// Invalid pullspecs
 	_, errInvalid := ParseVersionFromPullspec("invalid-pullspec")
 	g.Expect(errInvalid).To(HaveOccurred())
