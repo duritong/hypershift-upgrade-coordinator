@@ -30,17 +30,27 @@ var ImagePattern = regexp.MustCompile(`^(\S+)/(\S+):([0-9]+\.[0-9]+\.[0-9]+-[a-z
 
 // ParseVersionFromPullspec extracts the semantic version from the tag slice: <version>-<arch>
 func ParseVersionFromPullspec(pullspec string) (string, error) {
+	version, _, err := ParseReleaseImageMetadata(pullspec)
+	return version, err
+}
+
+// ParseReleaseImageMetadata extracts the full semantic version and final architecture
+// suffix from a digest-pinned release tag. It does not inspect the image payload.
+func ParseReleaseImageMetadata(pullspec string) (version, arch string, err error) {
 	matches := ImagePattern.FindStringSubmatch(pullspec)
 	if len(matches) < 4 {
-		return "", fmt.Errorf("invalid pullspec format: must match registry.domain.com/path:version-arch@sha256:digest")
+		return "", "", fmt.Errorf("invalid pullspec format: must match registry.domain.com/path:version-arch@sha256:digest")
 	}
 	tag := matches[3] // e.g. "4.20.44-x86_64", "4.16.0-rc.1-x86_64"
-	idx := strings.Index(tag, "-")
-	version := tag[:idx]
+	idx := strings.LastIndex(tag, "-")
+	version, arch = tag[:idx], tag[idx+1:]
 	if !semver.IsValid("v" + version) {
-		return "", fmt.Errorf("invalid semantic version extracted from pullspec: %s", version)
+		return "", "", fmt.Errorf("invalid semantic version extracted from pullspec: %s", version)
 	}
-	return version, nil
+	if arch == "" {
+		return "", "", fmt.Errorf("missing architecture suffix in pullspec")
+	}
+	return version, arch, nil
 }
 
 // ValidateUpgradePath validates release images and same-major, at-most-one-minor
@@ -52,9 +62,6 @@ func ValidateUpgradePath(currentRelease, targetPullspec, intermediatePullspec st
 	currentVersion, err := ExtractVersion(currentRelease)
 	if err != nil {
 		return fmt.Errorf("current cluster release image format is invalid: %w", err)
-	}
-	if len(strings.Split(currentVersion, ".")) != 3 {
-		return fmt.Errorf("invalid current version (expected major.minor.patch): %s", currentVersion)
 	}
 	targetVersion, err := ParseVersionFromPullspec(targetPullspec)
 	if err != nil {
@@ -110,30 +117,20 @@ func ValidateUpgradePath(currentRelease, targetPullspec, intermediatePullspec st
 	return nil
 }
 
-// ExtractVersion parses a semantic version string from either a full pullspec image or a raw version string (e.g. "4.13.0-x86_64" -> "4.13.0").
+// ExtractVersion preserves the full semantic version from a release pullspec or raw status version.
 func ExtractVersion(input string) (string, error) {
 	if input == "" {
 		return "", fmt.Errorf("empty version string")
 	}
 
 	if strings.Contains(input, "@sha256:") || strings.Contains(input, "/") {
-		v, err := ParseVersionFromPullspec(input)
-		if err != nil {
-			return "", err
-		}
-		if !semver.IsValid("v" + v) {
-			return "", fmt.Errorf("invalid semantic version extracted from pullspec: %s", v)
-		}
-		return v, nil
+		return ParseVersionFromPullspec(input)
 	}
 
 	v := strings.TrimPrefix(input, "v")
-	idx := strings.Index(v, "-")
-	if idx != -1 {
-		v = v[:idx]
-	}
-
-	if !semver.IsValid("v" + v) {
+	core, _, _ := strings.Cut(v, "-")
+	core, _, _ = strings.Cut(core, "+")
+	if !semver.IsValid("v"+v) || len(strings.Split(core, ".")) != 3 {
 		return "", fmt.Errorf("invalid semantic version: %s", input)
 	}
 	return v, nil

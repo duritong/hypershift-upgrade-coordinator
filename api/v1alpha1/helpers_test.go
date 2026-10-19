@@ -44,12 +44,12 @@ func TestParseVersionFromPullspec(t *testing.T) {
 	// Valid pullspec with release candidate tag (Issue 2.3)
 	vRC, errRC := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-rc.1-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 	g.Expect(errRC).NotTo(HaveOccurred())
-	g.Expect(vRC).To(Equal("4.16.0"))
+	g.Expect(vRC).To(Equal("4.16.0-rc.1"))
 
 	// Valid pullspec with nightly tag (Issue 2.3)
-	vNightly, errNightly := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-0.nightly-2024-10-12-044234@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	vNightly, errNightly := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-0.nightly-2024-10-12-044234-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 	g.Expect(errNightly).NotTo(HaveOccurred())
-	g.Expect(vNightly).To(Equal("4.16.0"))
+	g.Expect(vNightly).To(Equal("4.16.0-0.nightly-2024-10-12-044234"))
 
 	// Invalid pullspecs
 	_, errInvalid := ParseVersionFromPullspec("invalid-pullspec")
@@ -57,6 +57,27 @@ func TestParseVersionFromPullspec(t *testing.T) {
 
 	_, errNoDigest := ParseVersionFromPullspec("quay.io/ocp:4.14.0")
 	g.Expect(errNoDigest).To(HaveOccurred())
+}
+
+func TestParseReleaseImageMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		tag, version, arch string
+		wantErr            bool
+	}{
+		{"4.16.0-x86_64", "4.16.0", "x86_64", false},
+		{"4.16.0-rc.1-x86_64", "4.16.0-rc.1", "x86_64", false},
+		{"4.16.0-rc-test.1-aarch64", "4.16.0-rc-test.1", "aarch64", false},
+		{"4.16.0", "", "", true},
+		{"4.16.0-rc.01-x86_64", "", "", true},
+		{"4.16.0-x86_64-", "", "", true},
+	} {
+		t.Run(tt.tag, func(t *testing.T) {
+			version, arch, err := ParseReleaseImageMetadata("quay.io/ocp:" + tt.tag + "@sha256:" + strings.Repeat("a", 64))
+			if (err != nil) != tt.wantErr || version != tt.version || arch != tt.arch {
+				t.Fatalf("ParseReleaseImageMetadata() = %q, %q, %v; want %q, %q, wantErr %v", version, arch, err, tt.version, tt.arch, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestValidateUpgradePath(t *testing.T) {
@@ -68,6 +89,17 @@ func TestValidateUpgradePath(t *testing.T) {
 		allowEqual, wantErr                 bool
 	}{
 		{"patch", "4.20.0", image("4.20.1"), "", false, false},
+		{"raw prerelease to final", "4.20.0-rc.1", image("4.20.0"), "", false, false},
+		{"image prerelease to final", image("4.20.0-rc.1"), image("4.20.0"), "", false, false},
+		{"numeric prerelease progression", "4.20.0-rc.2", image("4.20.0-rc.10"), "", false, false},
+		{"prerelease downgrade", "4.20.0-rc.10", image("4.20.0-rc.2"), "", true, true},
+		{"final to prerelease downgrade", "4.20.0", image("4.20.0-rc.1"), "", true, true},
+		{"prerelease intermediate", "4.20.0-rc.1", image("4.22.0-rc.1"), image("4.21.0-rc.1"), false, false},
+		{"prerelease direct multi minor", "4.20.0-rc.1", image("4.22.0-rc.1"), "", false, true},
+		{"prerelease first hop multi minor", "4.20.0-rc.1", image("4.23.0-rc.1"), image("4.22.0-rc.1"), false, true},
+		{"prerelease second hop multi minor", "4.20.0-rc.1", image("4.23.0-rc.1"), image("4.21.0-rc.1"), false, true},
+		{"invalid raw prerelease", "4.20.0-rc.01", image("4.21.0"), "", false, true},
+		{"invalid image prerelease", "4.20.0", image("4.21.0-rc.01"), "", false, true},
 		{"minor", "4.20.0", image("4.21.0"), "", false, false},
 		{"current pullspec", image("4.20.0"), image("4.21.0"), "", false, false},
 		{"eus", "4.20.0", image("4.22.0"), image("4.21.0"), false, false},
@@ -129,10 +161,12 @@ func TestExtractVersion(t *testing.T) {
 	g.Expect(err2).NotTo(HaveOccurred())
 	g.Expect(v2).To(Equal("4.13.0"))
 
-	// From semver string with arch suffix
-	v3, err3 := ExtractVersion("4.13.0-x86_64")
+	// Preserve the complete raw status version, including prerelease and build metadata.
+	v3, err3 := ExtractVersion("4.13.0-rc.1+build.2")
 	g.Expect(err3).NotTo(HaveOccurred())
-	g.Expect(v3).To(Equal("4.13.0"))
+	g.Expect(v3).To(Equal("4.13.0-rc.1+build.2"))
+	_, errArch := ExtractVersion("4.13.0-x86_64")
+	g.Expect(errArch).To(HaveOccurred())
 
 	// From v-prefixed string
 	v4, err4 := ExtractVersion("v4.14.2")
