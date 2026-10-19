@@ -128,21 +128,24 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 			}
 			state, _ := hMap["state"].(string)
 			if state == "Completed" {
-				currentRelease, _ = hMap["image"].(string)
+				currentRelease, _ = hMap["version"].(string)
 				if currentRelease == "" {
-					currentRelease, _ = hMap["version"].(string)
+					currentRelease, _ = hMap["image"].(string)
 				}
 				break
 			}
 		}
 		if currentRelease == "" {
 			if hMap, ok := history[0].(map[string]interface{}); ok {
-				currentRelease, _ = hMap["image"].(string)
+				currentRelease, _ = hMap["version"].(string)
 				if currentRelease == "" {
-					currentRelease, _ = hMap["version"].(string)
+					currentRelease, _ = hMap["image"].(string)
 				}
 			}
 		}
+	}
+	if currentRelease == "" {
+		currentRelease, _, _ = unstructured.NestedString(uHC.Object, "status", "version", "desired", "version")
 	}
 	if currentRelease == "" {
 		currentRelease, _, _ = unstructured.NestedString(uHC.Object, "status", "version", "desired", "image")

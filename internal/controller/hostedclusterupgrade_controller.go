@@ -346,7 +346,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	// admission. Recheck the remaining path before any resource mutations.
 	if installing, _ := r.checkClusterInstallingAndHealth(uHC); !installing {
 		currentRelease, currentVersion := GetHostedClusterCurrentRelease(uHC)
-		if currentRelease == "" {
+		if currentVersion != "" {
 			currentRelease = currentVersion
 		}
 		if err := upgradev1alpha1.ValidateUpgradePath(currentRelease, hcu.Spec.TargetReleaseImage, hcu.Spec.IntermediateReleaseImage, true); err != nil {

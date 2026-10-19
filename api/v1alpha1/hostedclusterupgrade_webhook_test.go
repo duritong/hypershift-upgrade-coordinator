@@ -89,6 +89,19 @@ func TestWebhookUpgradePath(t *testing.T) {
 	}
 }
 
+func TestAdmissionDigestOnlyCurrentRelease(t *testing.T) {
+	hc := createMockHostedCluster("cluster", "clusters", "quay.io/ocp@sha256:"+strings.Repeat("a", 64))
+	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{map[string]interface{}{
+		"state": "Completed", "version": "4.20.0", "image": "quay.io/ocp@sha256:" + strings.Repeat("a", 64),
+	}}, "status", "version", "history")
+	v := &HostedClusterUpgradeCustomValidator{Client: upgradePathTestClient{hc: hc}}
+	hcu := &HostedClusterUpgrade{ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: "clusters"},
+		Spec: HostedClusterUpgradeSpec{TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("b", 64)}}
+	if _, err := v.ValidateCreate(context.Background(), hcu); err != nil {
+		t.Fatalf("digest-only current image with explicit status version rejected: %v", err)
+	}
+}
+
 var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 	Context("Unit tests for helper functions", func() {
 		It("should correctly parse semantic version from a compliant release pullspec", func() {
