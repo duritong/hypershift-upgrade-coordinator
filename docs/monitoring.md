@@ -1,6 +1,6 @@
 # HyperShift Upgrade Coordinator Monitoring & Alerting
 
-This document contains the official SRE monitoring specifications for the HyperShift Upgrade Coordinator, detailing active **SRE Alert Rules** and **Grafana Dashboard** setups.
+This document describes the SRE alert rules and Grafana dashboard for the HyperShift Upgrade Coordinator.
 
 ---
 
@@ -20,108 +20,67 @@ All alerting configurations are natively managed and deployed via Kustomize. SRE
 
 ## 2. Grafana Dashboard Specification
 
-To visualize the upgrade fleet, SREs use a Grafana dashboard targeting the `/metrics` endpoint of the coordinator. By utilizing version-level metric labels, this dashboard supports robust path filtering and transition tables.
+Import [the dashboard JSON](monitoring/grafana-dashboard.json) into Grafana and select a Prometheus datasource scraping the coordinator's `/metrics` endpoint. The dashboard refreshes every **30 seconds**. Instant panels show the latest samples at the selected time range's end; rollout curves show history across that range.
 
-SREs can import the complete dashboard JSON definition directly from the source file at [**`docs/monitoring/grafana-dashboard.json`**](monitoring/grafana-dashboard.json).
+### Dashboard Variables
 
-### Dashboard Variables (Dynamic Filtering)
-To make the dashboard interactive and searchable across a large fleet of clusters, the following Prometheus-backed template variables are defined:
+| Variable | Type | Purpose / Query |
+| :--- | :--- | :--- |
+| `$datasource` | Datasource (`prometheus`) | Selects the datasource used by every panel and version variable. |
+| `$current_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, current_version)` |
+| `$target_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, target_version)` |
 
-1. **`$current_version`**: Filter by the version the cluster started from.
-   - **Query:** `label_values(hypershift_upgrade_phase, current_version)`
-2. **`$target_version`**: Filter by the desired upgrade version.
-   - **Query:** `label_values(hypershift_upgrade_phase, target_version)`
+Version filters use the labels exported by the coordinator. `current_version` is intended to represent the upgrade's origin version; retaining that origin throughout a rollout is a controller responsibility, not something the dashboard reconstructs.
 
----
+### Dashboard Panels
 
-### Dashboard Layout Overview
+| Panel | Behavior |
+| :--- | :--- |
+| Completed Upgrades | Instant count of matching upgrades in phase 6; not an all-phase fleet summary. |
+| Total Active Upgrades | Instant count of matching upgrades in phases 3, 4, or 5 (control-plane rollout, control-plane verification, or worker rollout). Both stats return zero when no matching series exist. |
+| Fleet Upgrade Current State | A single instant Prometheus table query exposes namespace, name, current/target/intermediate version labels and phase. It includes all matching phases, not just active upgrades. Phase values are mapped to readable names. It is not a joined duration/step matrix. |
+| Upgrade Durations (Seconds) | Instant bar gauges for positive overall and ControlPlane step durations, in seconds. These are not restricted to currently active phases. |
+| Control Plane Component Rollout Statuses | Instant table of component readiness for matching upgrades: 0 = unavailable, 1 = rolling, 2 = ready. |
+| NodePool Upgrade Rollout Ratio Curve | Historical per-pool rollout percentages, with namespace/upgrade/pool identities in the legend. |
+| Aggregated Cluster Node Rollout Curve | Historical per-cluster worker rollout percentages. |
+| Blocked NodePools | Instant table listing matching pools whose blocked metric is 1. An empty table means no matching blocked pools are reported, not proof that every pool is healthy. |
+
+Current-state tables use `instant: true`, `range: false`, and `format: "table"`. The fleet state table uses only the phase metric, so its labels and value form one table without cross-query joins or transformations. Component and blocked-pool tables likewise use a single instant query. Only the rollout curves use range queries.
+
+Phase mapping: 0 = idle, 1 = installing, 2 = preflight checks or pending schedule, 3 = upgrading control plane, 4 = verifying control plane, 5 = upgrading NodePools, 6 = completed, 7 = blocked, 8 = paused.
+
+### Query Contracts
+
+The active count applies both version filters to both bounds and includes worker upgrades (phase 5):
+
+```promql
+count(
+  (hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"} >= 3)
+  and
+  (hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"} <= 5)
+) or vector(0)
 ```
-+----------------------------------------------------------------------------------------------------+
-|  [ Variables: Current Version: $current_version | Target Version: $target_version ]                |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 1: Fleet Upgrade State Summary ]     [ Panel 2: Total Active Upgrades ]                   |
-|  Single-stat gauge showing count of Completed, Blocked, Paused, and Upgrading clusters.             |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 3: Active Upgrade Fleet Transition Matrix ]                                               |
-|  A table showing Name, Phase, Current Version, Target Version, Intermediate Version, Overall Dur,  |
-|  and Active Step Duration (CP or individual NodePools).                                            |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 4: Active Upgrades Live Duration vs Step Duration ]                                       |
-|  Bar gauge sorting currently running upgrades by elapsed duration in hours (Alert line @ 4h overall|
-|  and separate panels sorting by Control Plane vs NodePool step durations).                         |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 5: Control Plane Component Rollout Statuses ]                                             |
-|  A table listing all components (etcd, apiserver, etc.) across clusters with readiness states.      |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 6: NodePool Upgrade Rollout Ratio Curve ]                                                 |
-|  Time-series chart graphing rollout curves (updated/total nodes ratio) for active NodePools.       |
-+----------------------------------------------------------------------------------------------------+
-|  [ Panel 7: Aggregated Cluster Node Rollout Curve ]                                                |
-|  Time-series chart graphing overall upgraded worker nodes percentage curve (0% to 100%).           |
-+----------------------------------------------------------------------------------------------------+
+
+Worker rollout ratios have only identity labels: `namespace`, `name`, and (for per-pool ratios) `nodepool`. They do **not** have version labels. Filter them using a set intersection with the version-filtered phase metric:
+
+```promql
+(
+  hypershift_upgrade_nodepool_rollout_ratio
+  and on(namespace, name)
+  hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"}
+) * 100
 ```
 
-### JSON Definition Template (Snippets)
+The aggregated curve uses the same expression with `hypershift_upgrade_aggregated_node_rollout_ratio`. The component readiness table also uses this identity intersection. `and on(namespace, name)` retains the left-hand values and labels, supports multiple pools/components per upgrade, and does not multiply ratios by the numeric phase. Matching both namespace and name avoids collisions between same-named upgrades in different namespaces. These intersections select versions, not active phases.
 
-Here are the specific query definitions used to construct the panels in Grafana, integrating the new version and step duration dimensions:
+Unlike the ratios, the blocked-pool metric already exports version labels and can be filtered directly:
 
-#### Panel 1: Count of Upgraded/Upgrading/Blocked Clusters (Stat Panel)
-*   **Completed Upgrades Query:**
-    ```promql
-    count(hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"} == 6)
-    ```
-*   **Active CP Upgrades Query:**
-    ```promql
-    count(hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"} == 3 or hypershift_upgrade_phase == 4)
-    ```
-*   **Blocked/Stuck Upgrades Query:**
-    ```promql
-    count(hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"} == 7 or hypershift_upgrade_nodepool_blocked == 1)
-    ```
+```promql
+hypershift_upgrade_nodepool_blocked{current_version=~"$current_version", target_version=~"$target_version"} == 1
+```
 
-#### Panel 3: Active Upgrade Fleet Transition Matrix (Table Panel)
-*   To retrieve metadata and phase:
-    ```promql
-    hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"}
-    ```
-*   To join with overall duration:
-    ```promql
-    hypershift_upgrade_duration_seconds{current_version=~"$current_version", target_version=~"$target_version"}
-    ```
-*   To join with step duration:
-    ```promql
-    hypershift_upgrade_step_duration_seconds{current_version=~"$current_version", target_version=~"$target_version"}
-    ```
+The queries assume `namespace` is the upgrade resource's namespace. Scrape configuration must preserve that metric label rather than replace it with the coordinator pod's namespace (for example, via an appropriate `honorLabels` or relabeling policy). Dashboard queries do not resolve scrape-label conflicts.
 
-#### Panel 4: Active Upgrades Duration Listing (Bar Gauge)
-*   **Query for Overall Upgrade Duration:**
-    ```promql
-    hypershift_upgrade_duration_seconds{current_version=~"$current_version", target_version=~"$target_version"} > 0
-    ```
-*   **Query for Specific Step Duration (e.g. Control Plane):**
-    ```promql
-    hypershift_upgrade_step_duration_seconds{step="ControlPlane", current_version=~"$current_version", target_version=~"$target_version"} > 0
-    ```
-*   **Unit:** `seconds (s)`
-*   **Thresholds**: `0s` (Green), `7200s` / 2h (Yellow), `14400s` / 4h (Red)
+### Regression Validation
 
-#### Panel 5: Blocked NodePools Alert Monitor (State Timeline)
-*   **Query:**
-    ```promql
-    hypershift_upgrade_nodepool_blocked{current_version=~"$current_version", target_version=~"$target_version"} == 1
-    ```
-*   **Value Mapping**: `1` -> "BLOCKED" (Red), `0` -> "Healthy" (Green)
-
-#### Panel 6: Worker Node Upgrade Curves (Time Series)
-*   **Query:**
-    ```promql
-    hypershift_upgrade_nodepool_rollout_ratio{current_version=~"$current_version", target_version=~"$target_version"} * 100
-    ```
-*   **Unit**: `Percent (0-100)`
-
-#### Panel 7: Aggregated Cluster Node Rollout Curve (Time Series)
-*   **Query:**
-    ```promql
-    hypershift_upgrade_aggregated_node_rollout_ratio * 100
-    ```
-*   **Unit**: `Percent (0-100)`
+Run `go test ./internal/controller -run '^TestGrafanaDashboard$' -count=1` to validate the JSON, datasource wiring, version variables, complete query contracts, worker label selectors, instant/table versus range query modes, blocked-pool panel, and refresh cadence without starting the controller envtest suite. These are static dashboard contract tests, not live Prometheus query evaluation or Grafana rendering tests.

@@ -20,108 +20,168 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"testing"
+	"time"
 )
 
-// Minimal structures for Grafana JSON parsing validation
-type GrafanaTarget struct {
-	Expr string `json:"expr"`
-}
-
-type GrafanaPanel struct {
-	Title   string          `json:"title"`
-	Type    string          `json:"type"`
-	Targets []GrafanaTarget `json:"targets"`
-}
-
-type GrafanaVariable struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-
-type GrafanaTemplating struct {
-	List []GrafanaVariable `json:"list"`
-}
-
-type GrafanaDashboard struct {
-	Title      string            `json:"title"`
-	Panels     []GrafanaPanel    `json:"panels"`
-	Templating GrafanaTemplating `json:"templating"`
-}
-
-var _ = Describe("Grafana Dashboard Validation", func() {
-	It("should be a valid JSON file and contain all required SRE metrics and template variables", func() {
-		dashboardPath := filepath.Join("..", "..", "docs", "monitoring", "grafana-dashboard.json")
-
-		// Assert file exists
-		_, err := os.Stat(dashboardPath)
-		Expect(err).NotTo(HaveOccurred(), "Grafana dashboard JSON file should exist at docs/monitoring/grafana-dashboard.json")
-
-		// Read and Parse JSON
-		data, err := os.ReadFile(dashboardPath)
-		Expect(err).NotTo(HaveOccurred(), "Failed to read Grafana dashboard JSON file")
-
-		var dashboard GrafanaDashboard
-		err = json.Unmarshal(data, &dashboard)
-		Expect(err).NotTo(HaveOccurred(), "Grafana dashboard should be a valid JSON document")
-
-		// Verify Dashboard Title
-		Expect(dashboard.Title).To(ContainSubstring("HyperShift Upgrade Coordinator"))
-
-		// Verify Variables (current_version, target_version)
-		var hasCurrentVersion, hasTargetVersion bool
-		for _, v := range dashboard.Templating.List {
-			if v.Name == "current_version" && v.Type == "query" {
-				hasCurrentVersion = true
+func TestGrafanaDashboard(t *testing.T) {
+	type datasource struct {
+		Type string `json:"type"`
+		UID  string `json:"uid"`
+	}
+	type target struct {
+		Expr       string     `json:"expr"`
+		Instant    bool       `json:"instant"`
+		Range      bool       `json:"range"`
+		Format     string     `json:"format"`
+		Datasource datasource `json:"datasource"`
+	}
+	type panel struct {
+		ID      int      `json:"id"`
+		Title   string   `json:"title"`
+		Type    string   `json:"type"`
+		Targets []target `json:"targets"`
+	}
+	var dashboard struct {
+		Title      string  `json:"title"`
+		Refresh    string  `json:"refresh"`
+		Panels     []panel `json:"panels"`
+		Templating struct {
+			List []struct {
+				Name       string     `json:"name"`
+				Type       string     `json:"type"`
+				Query      any        `json:"query"`
+				Datasource datasource `json:"datasource"`
+			} `json:"list"`
+		} `json:"templating"`
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "monitoring", "grafana-dashboard.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	const phase = `hypershift_upgrade_phase{current_version=~"$current_version", target_version=~"$target_version"}`
+	// Exact, whitespace-insensitive contracts catch unfiltered OR branches and
+	// invalid label selectors without adding a PromQL engine dependency.
+	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
+	contracts := []struct {
+		id    int
+		title string
+		kind  string
+		exprs []string
+	}{
+		{1, "Completed Upgrades", "stat", []string{`count(` + phase + ` == 6) or vector(0)`}},
+		{2, "Total Active Upgrades", "stat", []string{`count((` + phase + ` >= 3) and (` + phase + ` <= 5)) or vector(0)`}},
+		{3, "Fleet Upgrade Current State", "table", []string{phase}},
+		{4, "Upgrade Durations (Seconds)", "bargauge", []string{
+			`hypershift_upgrade_duration_seconds{current_version=~"$current_version", target_version=~"$target_version"} > 0`,
+			`hypershift_upgrade_step_duration_seconds{step="ControlPlane", current_version=~"$current_version", target_version=~"$target_version"} > 0`,
+		}},
+		{5, "Control Plane Component Rollout Statuses", "table", []string{
+			`hypershift_upgrade_controlplane_component_ready{component!=""} and on(namespace, name) ` + phase,
+		}},
+		{6, "NodePool Upgrade Rollout Ratio Curve", "timeseries", []string{
+			`(hypershift_upgrade_nodepool_rollout_ratio and on(namespace, name) ` + phase + `) * 100`,
+		}},
+		{7, "Aggregated Cluster Node Rollout Curve", "timeseries", []string{
+			`(hypershift_upgrade_aggregated_node_rollout_ratio and on(namespace, name) ` + phase + `) * 100`,
+		}},
+		{8, "Blocked NodePools", "table", []string{
+			`hypershift_upgrade_nodepool_blocked{current_version=~"$current_version", target_version=~"$target_version"} == 1`,
+		}},
+	}
+	for _, contract := range contracts {
+		t.Run(contract.title, func(t *testing.T) {
+			var found *panel
+			for i := range dashboard.Panels {
+				if dashboard.Panels[i].ID == contract.id {
+					if found != nil {
+						t.Fatalf("duplicate panel ID %d", contract.id)
+					}
+					found = &dashboard.Panels[i]
+				}
 			}
-			if v.Name == "target_version" && v.Type == "query" {
-				hasTargetVersion = true
+			if found == nil {
+				t.Fatalf("missing panel %d", contract.id)
+			}
+			if found.Title != contract.title || found.Type != contract.kind {
+				t.Errorf("panel identity = %q (%s), want %q (%s)", found.Title, found.Type, contract.title, contract.kind)
+			}
+			if len(found.Targets) != len(contract.exprs) {
+				t.Fatalf("got %d targets, want %d", len(found.Targets), len(contract.exprs))
+			}
+			for i, query := range found.Targets {
+				if compact(query.Expr) != compact(contract.exprs[i]) {
+					t.Errorf("target %d query = %s; want %s", i, query.Expr, contract.exprs[i])
+				}
+				wantRange := contract.kind == "timeseries"
+				if query.Range != wantRange || query.Instant == wantRange {
+					t.Errorf("target %d: range=%t instant=%t, want range=%t instant=%t", i, query.Range, query.Instant, wantRange, !wantRange)
+				}
+				if contract.kind == "table" && query.Format != "table" {
+					t.Errorf("target %d: current-state tables need Prometheus table format, got %q", i, query.Format)
+				}
+			}
+		})
+	}
+	t.Run("datasource and version variables", func(t *testing.T) {
+		variables := make(map[string]bool)
+		for _, variable := range dashboard.Templating.List {
+			if variables[variable.Name] {
+				t.Errorf("duplicate variable %q", variable.Name)
+			}
+			variables[variable.Name] = true
+			if variable.Name == "datasource" {
+				if variable.Type != "datasource" || variable.Query != "prometheus" {
+					t.Errorf("datasource must be a Prometheus datasource variable: %+v", variable)
+				}
+				continue
+			}
+			if variable.Name == "current_version" || variable.Name == "target_version" {
+				query, ok := variable.Query.(map[string]any)
+				if variable.Type != "query" || !ok || query["query"] != "label_values(hypershift_upgrade_phase, "+variable.Name+")" {
+					t.Errorf("invalid version variable: %+v", variable)
+				}
+				if variable.Datasource != (datasource{Type: "prometheus", UID: "${datasource}"}) {
+					t.Errorf("version variable %s does not use selected datasource", variable.Name)
+				}
 			}
 		}
-		Expect(hasCurrentVersion).To(BeTrue(), "Dashboard must have 'current_version' query template variable")
-		Expect(hasTargetVersion).To(BeTrue(), "Dashboard must have 'target_version' query template variable")
-
-		// Verify that critical panels exist and reference HUC custom metrics
-		requiredPanels := []string{
-			"Fleet Upgrade State Summary",
-			"Total Active Upgrades",
-			"Active Upgrade Fleet Transition Matrix",
-			"Active Upgrades Live Duration vs Step Duration",
-			"Control Plane Component Rollout Statuses",
-			"NodePool Upgrade Rollout Ratio Curve",
-			"Aggregated Cluster Node Rollout Curve",
+		for _, name := range []string{"datasource", "current_version", "target_version"} {
+			if !variables[name] {
+				t.Errorf("missing template variable %s", name)
+			}
 		}
-
-		foundPanels := make(map[string]bool)
-		var allExpressions []string
-
 		for _, p := range dashboard.Panels {
-			foundPanels[p.Title] = true
-			for _, t := range p.Targets {
-				allExpressions = append(allExpressions, t.Expr)
+			for _, query := range p.Targets {
+				if query.Datasource != (datasource{Type: "prometheus", UID: "${datasource}"}) {
+					t.Errorf("panel %d does not use selected datasource", p.ID)
+				}
 			}
-		}
-
-		for _, rp := range requiredPanels {
-			Expect(foundPanels[rp]).To(BeTrue(), "Missing required panel: %s", rp)
-		}
-
-		// Verify references to our precise Prometheus metrics
-		requiredMetrics := []string{
-			"hypershift_upgrade_phase",
-			"hypershift_upgrade_duration_seconds",
-			"hypershift_upgrade_step_duration_seconds",
-			"hypershift_upgrade_controlplane_component_ready",
-			"hypershift_upgrade_nodepool_rollout_ratio",
-			"hypershift_upgrade_aggregated_node_rollout_ratio",
-		}
-
-		combinedExprs := strings.Join(allExpressions, " ")
-		for _, m := range requiredMetrics {
-			Expect(combinedExprs).To(ContainSubstring(m), "Grafana queries must reference the custom metric: %s", m)
 		}
 	})
-})
+	t.Run("worker label contracts", func(t *testing.T) {
+		// Worker ratios have no version labels. Filters must be applied to phase
+		// and joined by BOTH identity labels, preserving each NodePool's value.
+		selector := regexp.MustCompile(`(hypershift_upgrade_(?:nodepool_rollout_ratio|aggregated_node_rollout_ratio))(\{[^}]*\})?`)
+		for _, p := range dashboard.Panels {
+			for _, query := range p.Targets {
+				for _, match := range selector.FindAllStringSubmatch(query.Expr, -1) {
+					if strings.Contains(match[2], "version") {
+						t.Errorf("%s filters worker metric on nonexistent version labels", query.Expr)
+					}
+				}
+			}
+		}
+	})
+	t.Run("refresh", func(t *testing.T) {
+		refresh, err := time.ParseDuration(dashboard.Refresh)
+		if err != nil || refresh < 5*time.Second || refresh > time.Minute {
+			t.Errorf("dashboard needs a live refresh between 5s and 1m, got %q", dashboard.Refresh)
+		}
+	})
+}

@@ -20,6 +20,7 @@
   "id": null,
   "links": [],
   "liveNow": false,
+  "refresh": "30s",
   "panels": [
     {
       "collapsed": false,
@@ -30,7 +31,7 @@
         "y": 0
       },
       "id": 1,
-      "title": "Fleet Upgrade State Summary",
+      "title": "Completed Upgrades",
       "type": "stat",
       "targets": [
         {
@@ -39,9 +40,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 6)",
+          "expr": "count(hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 6) or vector(0)",
           "legendFormat": "Completed",
-          "range": true,
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -64,9 +66,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 3 or hypershift_upgrade_phase == 4)",
+          "expr": "count((hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} >= 3) and (hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"} <= 5)) or vector(0)",
           "legendFormat": "Active Upgrades",
-          "range": true,
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -80,8 +83,38 @@
         "y": 4
       },
       "id": 3,
-      "title": "Active Upgrade Fleet Transition Matrix",
+      "title": "Fleet Upgrade Current State",
       "type": "table",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Phase" },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": { "text": "Idle" },
+                      "1": { "text": "Installing" },
+                      "2": { "text": "Preflight / Pending Schedule" },
+                      "3": { "text": "Upgrading Control Plane" },
+                      "4": { "text": "Verifying Control Plane" },
+                      "5": { "text": "Upgrading NodePools" },
+                      "6": { "text": "Completed" },
+                      "7": { "text": "Blocked" },
+                      "8": { "text": "Paused" }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
       "targets": [
         {
           "datasource": {
@@ -91,30 +124,10 @@
           "editorMode": "code",
           "expr": "hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
           "legendFormat": "Phase",
-          "range": true,
+          "format": "table",
+          "instant": true,
+          "range": false,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "hypershift_upgrade_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
-          "legendFormat": "Overall Duration",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "hypershift_upgrade_step_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
-          "legendFormat": "Step Duration",
-          "range": true,
-          "refId": "C"
         }
       ]
     },
@@ -127,8 +140,12 @@
         "y": 12
       },
       "id": 4,
-      "title": "Active Upgrades Live Duration vs Step Duration",
+      "title": "Upgrade Durations (Seconds)",
       "type": "bargauge",
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
       "targets": [
         {
           "datasource": {
@@ -138,7 +155,8 @@
           "editorMode": "code",
           "expr": "hypershift_upgrade_duration_seconds{current_version=~\"$current_version\", target_version=~\"$target_version\"} > 0",
           "legendFormat": "{{name}} (Overall)",
-          "range": true,
+          "instant": true,
+          "range": false,
           "refId": "A"
         },
         {
@@ -149,7 +167,8 @@
           "editorMode": "code",
           "expr": "hypershift_upgrade_step_duration_seconds{step=\"ControlPlane\", current_version=~\"$current_version\", target_version=~\"$target_version\"} > 0",
           "legendFormat": "{{name}} (CP Step)",
-          "range": true,
+          "instant": true,
+          "range": false,
           "refId": "B"
         }
       ]
@@ -172,9 +191,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "hypershift_upgrade_controlplane_component_ready{component!=\"\"}",
+          "expr": "hypershift_upgrade_controlplane_component_ready{component!=\"\"} and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}",
           "legendFormat": "{{component}} ready status",
-          "range": true,
+          "format": "table",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -190,6 +211,10 @@
       "id": 6,
       "title": "NodePool Upgrade Rollout Ratio Curve",
       "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 },
+        "overrides": []
+      },
       "targets": [
         {
           "datasource": {
@@ -197,8 +222,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "hypershift_upgrade_nodepool_rollout_ratio{current_version=~\"$current_version\", target_version=~\"$target_version\"} * 100",
-          "legendFormat": "{{nodepool}} rollout %",
+          "expr": "(hypershift_upgrade_nodepool_rollout_ratio and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}) * 100",
+          "legendFormat": "{{namespace}}/{{name}}/{{nodepool}} rollout %",
           "range": true,
           "refId": "A"
         }
@@ -215,6 +240,10 @@
       "id": 7,
       "title": "Aggregated Cluster Node Rollout Curve",
       "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 },
+        "overrides": []
+      },
       "targets": [
         {
           "datasource": {
@@ -222,9 +251,27 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "hypershift_upgrade_aggregated_node_rollout_ratio * 100",
-          "legendFormat": "{{name}} overall rollout %",
+          "expr": "(hypershift_upgrade_aggregated_node_rollout_ratio and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}) * 100",
+          "legendFormat": "{{namespace}}/{{name}} overall rollout %",
           "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "id": 8,
+      "title": "Blocked NodePools",
+      "description": "Currently blocked NodePools matching the selected upgrade versions. An empty table means no matching blocked pools are reported.",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "hypershift_upgrade_nodepool_blocked{current_version=~\"$current_version\", target_version=~\"$target_version\"} == 1",
+          "format": "table",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -235,6 +282,15 @@
   "tags": ["hypershift", "operator", "sre"],
   "templating": {
     "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "options": [],
+        "current": {}
+      },
       {
         "current": {},
         "datasource": {
@@ -285,5 +341,5 @@
   },
   "title": "HyperShift Upgrade Coordinator SRE Dashboard",
   "uid": "huc-sre-dashboard",
-  "version": 1
+  "version": 2
 }
