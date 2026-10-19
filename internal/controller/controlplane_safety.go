@@ -182,6 +182,10 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlane(ctx context.Context,
 		return fmt.Errorf("waiting for HostedControlPlane: %w", err)
 	}
 	effective, _, _ := unstructured.NestedString(hcp.Object, "spec", "releaseImage")
+	management, found, managementErr := unstructured.NestedString(hcp.Object, "spec", "controlPlaneReleaseImage")
+	if managementErr != nil || (found && !samePayload(management, image)) {
+		return fmt.Errorf("HCP management release override conflicts with expected payload")
+	}
 	observed, _, _ := unstructured.NestedInt64(hc.Object, "status", "controlPlaneVersion", "observedGeneration")
 	if hcp.GetGeneration() < 1 || !samePayload(effective, image) || observed < hcp.GetGeneration() {
 		return fmt.Errorf("waiting for effective HCP payload and fresh management version status")

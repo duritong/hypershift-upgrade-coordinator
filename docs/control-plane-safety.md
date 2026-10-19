@@ -35,6 +35,8 @@ Completion requires the latest guest and management history entries to be
 HCP `spec.releaseImage`, management `observedGeneration`, and all observed CPCs
 to agree with that payload and HCP generation. CPC freshness is relative to HCP
 generation, not CPC or HC generation. Missing HCP or CPC evidence blocks progress.
+An HCP `spec.controlPlaneReleaseImage` differing from the expected payload also
+blocks, even if the HC override has already been removed.
 The guest version status generation is not treated as an HC generation fence.
 
 These prerequisites are checked again before subsequent hops and new worker

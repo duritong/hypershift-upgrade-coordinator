@@ -50,8 +50,22 @@ func TestControlPlaneInFlightIdentity(t *testing.T) {
 	}
 }
 
+func TestSameVersionDifferentPayloadDoesNotRecoverAsSuccess(t *testing.T) {
+	for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhaseUpgradingControlPlane, upgradev1alpha1.PhaseVerifyingControlPlane, upgradev1alpha1.PhaseUpgradingNodePools} {
+		hcu := regressionHCU(phase)
+		hcu.Spec.TargetReleaseImage = strings.Split(hcu.Spec.TargetReleaseImage, "@")[0] + "@sha256:" + strings.Repeat("f", 64)
+		hc := regressionHC("4.21.0")
+		c := &regressionClient{objects: []client.Object{hcu, hc}}
+		addReadyCP(c, hc)
+		got := reconcileRegression(t, c)
+		if c.writes != 0 || got.Status.Phase == upgradev1alpha1.PhaseCompleted || (phase == upgradev1alpha1.PhaseVerifyingControlPlane && got.Status.Phase != phase) {
+			t.Fatalf("different payload recovered as success: %+v writes=%d", got.Status, c.writes)
+		}
+	}
+}
+
 func TestControlPlaneCompletionEvidence(t *testing.T) {
-	for _, defect := range []string{"none", "mirror", "different digest", "old completed", "partial", "wrong version", "missing HCP", "stale CPC", "wrong HCP", "stale management"} {
+	for _, defect := range []string{"none", "mirror", "different digest", "old completed", "partial", "wrong version", "missing HCP", "stale CPC", "wrong HCP", "HCP management override", "stale management"} {
 		t.Run(defect, func(t *testing.T) {
 			hcu := regressionHCU(upgradev1alpha1.PhaseVerifyingControlPlane)
 			hc := regressionHC("4.21.0")
@@ -60,7 +74,14 @@ func TestControlPlaneCompletionEvidence(t *testing.T) {
 			switch defect {
 			case "mirror":
 				_, digest, _ := strings.Cut(hcu.Spec.TargetReleaseImage, "@")
-				_ = unstructured.SetNestedField(hc.Object, "mirror/ocp@"+digest, "spec", "release", "image")
+				mirror := "mirror/ocp@" + digest
+				_ = unstructured.SetNestedField(hc.Object, mirror, "spec", "release", "image")
+				_ = unstructured.SetNestedField(hcp.Object, mirror, "spec", "releaseImage")
+				for _, field := range []string{"version", "controlPlaneVersion"} {
+					history, _, _ := unstructured.NestedSlice(hc.Object, "status", field, "history")
+					history[0].(map[string]interface{})["image"] = mirror
+					_ = unstructured.SetNestedSlice(hc.Object, history, "status", field, "history")
+				}
 			case "different digest":
 				_ = unstructured.SetNestedField(hc.Object, "wrong@sha256:"+strings.Repeat("f", 64), "status", "version", "desired", "image")
 			case "old completed", "partial":
@@ -74,6 +95,8 @@ func TestControlPlaneCompletionEvidence(t *testing.T) {
 				_ = unstructured.SetNestedField(hc.Object, int64(2), "status", "controlPlaneVersion", "observedGeneration")
 			case "wrong HCP":
 				_ = unstructured.SetNestedField(hcp.Object, regressionImage("4.20.0"), "spec", "releaseImage")
+			case "HCP management override":
+				_ = unstructured.SetNestedField(hcp.Object, regressionImage("4.22.0"), "spec", "controlPlaneReleaseImage")
 			case "stale management":
 				hcp.SetGeneration(2)
 				_ = unstructured.SetNestedField(cpc.Object, int64(2), "status", "observedGeneration")

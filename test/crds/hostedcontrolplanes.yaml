@@ -23,3 +23,5 @@ spec:
             properties:
               releaseImage:
                 type: string
+              controlPlaneReleaseImage:
+                type: string
