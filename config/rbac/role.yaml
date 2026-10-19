@@ -13,6 +13,12 @@ rules:
   - get
   - list
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - cluster.x-k8s.io
   resources:
   - machinedeployments

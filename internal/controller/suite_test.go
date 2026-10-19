@@ -24,6 +24,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,6 +83,11 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+	Expect(k8sClient.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "default"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+	})).To(Succeed())
 
 	// Initialize and start the Controller Manager to run our Reconciler in real-time
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -93,6 +100,8 @@ var _ = BeforeSuite(func() {
 
 	err = (&HostedClusterUpgradeReconciler{
 		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		ReleaseResolver:        fixtureReleaseResolver{},
 		Scheme:                 mgr.GetScheme(),
 		HostedClusterNamespace: "default",
 		LogScraper:             testLogScraper,

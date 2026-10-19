@@ -96,6 +96,8 @@ func main() {
 
 	if err = (&controller.HostedClusterUpgradeReconciler{
 		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		ReleaseResolver:        controller.NewRegistryReleaseMetadataResolver(),
 		Scheme:                 mgr.GetScheme(),
 		HostedClusterNamespace: hostedClusterNamespace,
 		LogScraper:             &controller.KubeLogScraper{Client: clientset},

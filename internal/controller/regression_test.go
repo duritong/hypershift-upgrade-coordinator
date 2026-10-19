@@ -116,7 +116,7 @@ func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedCl
 
 func reconcileRegression(t *testing.T, c *regressionClient) *upgradev1alpha1.HostedClusterUpgrade {
 	t.Helper()
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
 	key := client.ObjectKey{Namespace: "clusters", Name: "example"}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)

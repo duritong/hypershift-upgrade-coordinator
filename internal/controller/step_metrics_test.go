@@ -270,7 +270,7 @@ func TestStepTimersDoNotStartOnFailedActuation(t *testing.T) {
 			if phase == upgradev1alpha1.PhaseUpgradingNodePools {
 				name = "workers"
 			}
-			r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: name}}
+			r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: name}, ReleaseResolver: fixtureReleaseResolver{}}
 			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)})
 			if phase == upgradev1alpha1.PhaseUpgradingControlPlane && err == nil {
 				t.Fatal("expected failed CP update")
@@ -360,7 +360,7 @@ func TestStaleUpgradeGaugesAndDeletion(t *testing.T) {
 	}
 	t.Cleanup(func() { clearUpgradeGauges("other", "cluster") })
 	c.objects = nil
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestNodePoolStepTimerSurvivesLaterUpdateFailure(t *testing.T) {
 	if err := (&HostedClusterUpgradeReconciler{Client: base}).lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
 	}
-	r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: "b"}}
+	r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: "b"}, ReleaseResolver: fixtureReleaseResolver{}}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err != nil {
 		t.Fatal(err)
 	}

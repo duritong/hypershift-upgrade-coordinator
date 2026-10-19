@@ -111,6 +111,8 @@ func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix s
 // HostedClusterUpgradeReconciler reconciles a HostedClusterUpgrade object
 type HostedClusterUpgradeReconciler struct {
 	client.Client
+	APIReader              client.Reader // Uncached, get-only access to HC pull secrets.
+	ReleaseResolver        ReleaseMetadataResolver
 	Scheme                 *runtime.Scheme
 	HostedClusterNamespace string
 	LogScraper             LogScraper // Injectable log scraper for testing
@@ -209,6 +211,7 @@ func init() {
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/finalizers,verbs=update
 //+kubebuilder:rbac:groups=hypershift.openshift.io,resources=controlplanecomponents;hostedclusters;nodepools,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get;list
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets,verbs=get;list;watch
 
 // Reconcile is the main state machine loop for HostedClusterUpgrade.
@@ -360,6 +363,19 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			}
 			return ctrl.Result{}, nil
 		}
+	}
+
+	if err := r.verifyReleasePayloads(ctx, hcu, uHC); err != nil {
+		hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+		hcu.Status.Message = fmt.Sprintf("Release payload safety gate blocked: %v", err)
+		r.updateConditions(hcu)
+		r.exposePhaseMetrics(ctx, hcu, uHC)
+		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
+			if err := r.Status().Update(ctx, hcu); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// 4. Aggregate ControlPlaneComponent status (for SRE observability)

@@ -69,7 +69,7 @@ func TestWorkerLockFailureStopsControlPlane(t *testing.T) {
 				hcu := regressionHCU(phase)
 				hcu.UID = "upgrade-uid"
 				base := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0"), regressionNP("workers", "")}}
-				r := &HostedClusterUpgradeReconciler{Client: &workerLockFailureClient{regressionClient: base, failList: failList}}
+				r := &HostedClusterUpgradeReconciler{Client: &workerLockFailureClient{regressionClient: base, failList: failList}, ReleaseResolver: fixtureReleaseResolver{}}
 				if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err == nil {
 					t.Fatal("lock failure did not propagate")
 				}
