@@ -155,85 +155,11 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 		return fmt.Errorf("unable to determine current version from target HostedCluster '%s' spec or status", r.Name)
 	}
 
-	currentVersion, err := ExtractVersion(currentRelease)
-	if err != nil {
-		return fmt.Errorf("current cluster release image format is invalid: %v", err)
-	}
-
-	// 3. Parse target and intermediate release images
-	targetVersion, err := ExtractVersion(r.Spec.TargetReleaseImage)
-	if err != nil {
-		return fmt.Errorf("spec.targetReleaseImage format is invalid: %v", err)
-	}
-
-	var intermediateVersion string
-	if r.Spec.IntermediateReleaseImage != "" {
-		v, err := ExtractVersion(r.Spec.IntermediateReleaseImage)
-		if err != nil {
-			return fmt.Errorf("spec.intermediateReleaseImage format is invalid: %v", err)
-		}
-		intermediateVersion = v
-	}
-
-	// 4. Enforce Monotonic Version Progression and Strict At-Most-1-Minor Jumps
-	currMajor, currMinor, err := GetMajorMinor(currentVersion)
-	if err != nil {
+	// 3. Share path validation with controller preflight, but keep admission strict.
+	if err := ValidateUpgradePath(currentRelease, r.Spec.TargetReleaseImage, r.Spec.IntermediateReleaseImage, false); err != nil {
 		return err
 	}
 
-	tgtMajor, tgtMinor, err := GetMajorMinor(targetVersion)
-	if err != nil {
-		return err
-	}
-
-	// Target must always be strictly greater than current version
-	if !IsUpstreamGreater(currentVersion, targetVersion) {
-		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
-	}
-	if currMajor != tgtMajor {
-		return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, tgtMajor)
-	}
-
-	// Check if intermediate is specified and whether it is ahead of currentVersion or should be skipped
-	if intermediateVersion != "" {
-		intMajor, intMinor, err := GetMajorMinor(intermediateVersion)
-		if err != nil {
-			return err
-		}
-
-		if IsUpstreamGreater(currentVersion, intermediateVersion) {
-			// Intermediate is ahead of current: regular EUS multi-hop
-			if currMajor != intMajor {
-				return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, intMajor)
-			}
-			if intMinor-currMinor > 1 {
-				return fmt.Errorf("invalid minor version jump: intermediate version '%s' is more than 1 minor version ahead of current version '%s'", intermediateVersion, currentVersion)
-			}
-
-			// Second step: Intermediate -> Target
-			if !IsUpstreamGreater(intermediateVersion, targetVersion) {
-				return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than intermediate version '%s'", targetVersion, intermediateVersion)
-			}
-			if intMajor != tgtMajor {
-				return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", intMajor, tgtMajor)
-			}
-			if tgtMinor-intMinor > 1 {
-				return fmt.Errorf("invalid minor version jump: target version '%s' is more than 1 minor version ahead of intermediate version '%s'", targetVersion, intermediateVersion)
-			}
-		} else {
-			// Cluster is already at or past intermediate: Skip intermediate behavior
-			// In skip mode, target cannot be more than 1 minor version ahead of current
-			if tgtMinor-currMinor > 1 {
-				return fmt.Errorf("unsupported direct multi-minor jump: target version '%s' is more than 1 minor version ahead of current version '%s'", targetVersion, currentVersion)
-			}
-		}
-	} else {
-		// Direct step: Current -> Target
-		if tgtMinor-currMinor > 1 {
-			return fmt.Errorf("unsupported direct multi-minor jump: target version '%s' is more than 1 minor version ahead of current version '%s'. You must specify a singular intermediateReleaseImage for EUS hops (at most 2 minor versions overall).", targetVersion, currentVersion)
-		}
-	}
-
-	// 5. NodePool Group-Level Chronological Consistency Check
+	// 4. NodePool Group-Level Chronological Consistency Check
 	return validateNodePoolGroupSchedule(r.Spec.NodePoolGroups)
 }

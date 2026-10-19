@@ -173,3 +173,32 @@ func TestNodePoolGroupSafety(t *testing.T) {
 		})
 	}
 }
+
+func TestControllerVersionSafety(t *testing.T) {
+	for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhasePreflightChecks, upgradev1alpha1.PhaseUpgradingControlPlane, upgradev1alpha1.PhaseUpgradingNodePools} {
+		for _, target := range []string{regressionImage("4.19.0"), regressionImage("5.0.0"), regressionImage("4.22.0"), "invalid"} {
+			t.Run(string(phase)+"/"+target, func(t *testing.T) {
+				hcu := regressionHCU(phase)
+				hcu.Spec.TargetReleaseImage = target
+				c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0"), regressionNP("workers", "")}}
+				got := reconcileRegression(t, c)
+				if got.Status.Phase != upgradev1alpha1.PhaseBlocked || c.writes != 0 {
+					t.Fatalf("unsafe path was not blocked before writes: phase=%s writes=%d", got.Status.Phase, c.writes)
+				}
+			})
+		}
+	}
+}
+
+func TestControllerRecoveryAtTargetVerifiesComponents(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingControlPlane)
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0")}}
+	got := reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+		t.Fatalf("already-target recovery bypassed component verification: %s", got.Status.Phase)
+	}
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+		t.Fatalf("missing CPCs must prevent workers: %s", got.Status.Phase)
+	}
+}

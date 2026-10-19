@@ -106,6 +106,31 @@ func createAndSetStatusNodePool(ctx context.Context, name, namespace, clusterNam
 	return np
 }
 
+func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured) {
+	ns := &unstructured.Unstructured{}
+	ns.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
+	ns.SetName(hc.GetNamespace() + "-" + hc.GetName())
+	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+	DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
+	cpc := &unstructured.Unstructured{}
+	cpc.SetGroupVersionKind(gvkCPC)
+	cpc.SetNamespace(ns.GetName())
+	cpc.SetName("etcd")
+	Expect(k8sClient.Create(ctx, cpc)).To(Succeed())
+	DeferCleanup(func() { _ = k8sClient.Delete(ctx, cpc) })
+	_, version := GetHostedClusterCurrentRelease(hc)
+	_ = unstructured.SetNestedField(cpc.Object, version, "status", "version")
+	conditions := []interface{}{}
+	for _, typ := range []string{"Available", "RolloutComplete"} {
+		conditions = append(conditions, map[string]interface{}{
+			"type": typ, "status": "True", "reason": "AsExpected", "message": "Ready",
+			"lastTransitionTime": time.Now().Format(time.RFC3339),
+		})
+	}
+	_ = unstructured.SetNestedSlice(cpc.Object, conditions, "status", "conditions")
+	Expect(k8sClient.Status().Update(ctx, cpc)).To(Succeed())
+}
+
 var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 	const (
 		namespace = "default"
@@ -298,6 +323,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 			// 1. Create target HostedCluster already at target version to bypass CP upgrade step
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			createReadyControlPlane(ctx, uHC)
 
 			defer func() {
 				_ = k8sClient.Delete(ctx, uHC)
@@ -482,6 +508,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 			// HostedCluster at target version
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create a NodePool with status.version = "4.20.44" (semver string, NOT pullspec!)
@@ -978,6 +1005,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 			// Cluster at target version so CP upgrade is bypassed
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create 2 NodePools with pausedUntil: "" (not paused initially!)

@@ -18,6 +18,8 @@ package v1alpha1
 
 import (
 	"context"
+	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,7 +28,66 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+type upgradePathTestClient struct {
+	client.Client
+	hc *unstructured.Unstructured
+}
+
+func (c upgradePathTestClient) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	*obj.(*unstructured.Unstructured) = *c.hc.DeepCopy()
+	return nil
+}
+
+func TestWebhookUpgradePath(t *testing.T) {
+	image := func(version string) string {
+		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("a", 64)
+	}
+	for _, tt := range []struct {
+		name, current, target, intermediate string
+		wantErr                             bool
+	}{
+		{"direct", "4.20.0", image("4.21.0"), "", false},
+		{"eus", "4.20.0", image("4.22.0"), image("4.21.0"), false},
+		{"skip intermediate", "4.21.5", image("4.22.0"), image("4.21.0"), false},
+		{"equal target rejected", "4.21.0", image("4.21.0"), "", true},
+		{"downgrade rejected", "4.21.0", image("4.20.0"), "", true},
+		{"bare target rejected", "4.20.0", "4.21.0", "", true},
+		{"bare intermediate rejected", "4.20.0", image("4.22.0"), "4.21.0", true},
+		{"skipped cross major rejected", "4.21.0", image("4.22.0"), image("3.21.0"), true},
+		{"missing arch rejected", "4.20.0", "quay.io/ocp:4.21.0@sha256:" + strings.Repeat("a", 64), "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hc := createMockHostedCluster("cluster", "clusters", image(tt.current))
+			validator := &HostedClusterUpgradeCustomValidator{Client: upgradePathTestClient{hc: hc}}
+			hcu := &HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: hc.GetName(), Namespace: hc.GetNamespace()},
+				Spec:       HostedClusterUpgradeSpec{TargetReleaseImage: tt.target, IntermediateReleaseImage: tt.intermediate},
+			}
+			_, err := validator.ValidateCreate(context.Background(), hcu)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateCreate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			old := hcu.DeepCopy()
+			old.Spec.TargetReleaseImage = image("4.19.0")
+			_, err = validator.ValidateUpdate(context.Background(), old, hcu)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			// Non-image updates must remain possible after reaching target.
+			if tt.name == "equal target rejected" {
+				old = hcu.DeepCopy()
+				paused := "true"
+				hcu.Spec.PausedUntil = &paused
+				if _, err := validator.ValidateUpdate(context.Background(), old, hcu); err != nil {
+					t.Fatalf("unchanged-image update rejected after reaching target: %v", err)
+				}
+			}
+		})
+	}
+}
 
 var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 	Context("Unit tests for helper functions", func() {

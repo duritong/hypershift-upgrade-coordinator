@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -36,10 +37,9 @@ func TestParseVersionFromPullspec(t *testing.T) {
 	g.Expect(errArch2).NotTo(HaveOccurred())
 	g.Expect(vArch2).To(Equal("4.14.0"))
 
-	// Valid pullspec without dash in tag
-	vNoDash, errNoDash := ParseVersionFromPullspec("registry.example.com/repo/ocp:4.14.0@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-	g.Expect(errNoDash).NotTo(HaveOccurred())
-	g.Expect(vNoDash).To(Equal("4.14.0"))
+	// Architecture suffix is required.
+	_, errNoDash := ParseVersionFromPullspec("registry.example.com/repo/ocp:4.14.0@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	g.Expect(errNoDash).To(HaveOccurred())
 
 	// Valid pullspec with release candidate tag (Issue 2.3)
 	vRC, errRC := ParseVersionFromPullspec("quay.io/openshift-release-dev/ocp-release:4.16.0-rc.1-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
@@ -57,6 +57,59 @@ func TestParseVersionFromPullspec(t *testing.T) {
 
 	_, errNoDigest := ParseVersionFromPullspec("quay.io/ocp:4.14.0")
 	g.Expect(errNoDigest).To(HaveOccurred())
+}
+
+func TestValidateUpgradePath(t *testing.T) {
+	image := func(version string) string {
+		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("a", 64)
+	}
+	for _, tt := range []struct {
+		name, current, target, intermediate string
+		allowEqual, wantErr                 bool
+	}{
+		{"patch", "4.20.0", image("4.20.1"), "", false, false},
+		{"minor", "4.20.0", image("4.21.0"), "", false, false},
+		{"current pullspec", image("4.20.0"), image("4.21.0"), "", false, false},
+		{"eus", "4.20.0", image("4.22.0"), image("4.21.0"), false, false},
+		{"patch intermediate", "4.20.0", image("4.21.0"), image("4.20.1"), false, false},
+		{"intermediate reached", "4.21.0", image("4.22.0"), image("4.21.0"), false, false},
+		{"intermediate passed", "4.21.5", image("4.22.0"), image("4.21.0"), false, false},
+		{"older intermediate skipped", "4.21.0", image("4.22.0"), image("4.19.0"), false, false},
+		{"admission equality", "4.22.0", image("4.22.0"), "", false, true},
+		{"recovery equality", "4.22.0", image("4.22.0"), "", true, false},
+		{"recovery intermediate skipped", "4.22.0", image("4.22.0"), image("4.21.0"), true, false},
+		{"recovery intermediate equals target", "4.22.0", image("4.22.0"), image("4.22.0"), true, true},
+		{"recovery intermediate above target", "4.22.0", image("4.22.0"), image("4.23.0"), true, true},
+		{"recovery downgrade", "4.22.1", image("4.22.0"), "", true, true},
+		{"admission downgrade", "4.22.1", image("4.22.0"), "", false, true},
+		{"major jump", "4.22.0", image("5.0.0"), "", true, true},
+		{"skipped major mismatch", "4.21.0", image("4.22.0"), image("3.21.0"), false, true},
+		{"future major mismatch", "4.21.0", image("4.22.0"), image("5.0.0"), false, true},
+		{"direct multi minor", "4.20.0", image("4.22.0"), "", false, true},
+		{"first hop multi minor", "4.20.0", image("4.23.0"), image("4.22.0"), false, true},
+		{"second hop multi minor", "4.20.0", image("4.23.0"), image("4.21.0"), false, true},
+		{"skip multi minor", "4.21.0", image("4.23.0"), image("4.20.0"), false, true},
+		{"intermediate equals target", "4.20.0", image("4.21.0"), image("4.21.0"), false, true},
+		{"intermediate above target", "4.20.0", image("4.21.0"), image("4.21.1"), false, true},
+		{"empty current", "", image("4.21.0"), "", true, true},
+		{"invalid current", "invalid", image("4.21.0"), "", true, true},
+		{"short current", "4.20", image("4.21.0"), "", true, true},
+		{"invalid current image", "quay.io/ocp:4.20.0", image("4.21.0"), "", true, true},
+		{"empty target", "4.20.0", "", "", true, true},
+		{"bare target", "4.20.0", "4.21.0", "", true, true},
+		{"invalid target", "4.20.0", image("04.21.0"), "", true, true},
+		{"missing arch", "4.20.0", "quay.io/ocp:4.21.0@sha256:" + strings.Repeat("a", 64), "", true, true},
+		{"invalid digest", "4.20.0", image("4.21.0") + "a", "", true, true},
+		{"bare intermediate", "4.20.0", image("4.22.0"), "4.21.0", true, true},
+		{"invalid skipped intermediate", "4.22.0", image("4.22.0"), image("04.21.0"), true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateUpgradePath(tt.current, tt.target, tt.intermediate, tt.allowEqual)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateUpgradePath() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestExtractVersion(t *testing.T) {

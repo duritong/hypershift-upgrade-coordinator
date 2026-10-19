@@ -301,6 +301,25 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	}
 
+	// Admission may have been bypassed, and the cluster may have changed since
+	// admission. Recheck the remaining path before any resource mutations.
+	if installing, _ := r.checkClusterInstallingAndHealth(uHC); !installing {
+		currentRelease, currentVersion := GetHostedClusterCurrentRelease(uHC)
+		if currentRelease == "" {
+			currentRelease = currentVersion
+		}
+		if err := upgradev1alpha1.ValidateUpgradePath(currentRelease, hcu.Spec.TargetReleaseImage, hcu.Spec.IntermediateReleaseImage, true); err != nil {
+			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			hcu.Status.Message = fmt.Sprintf("Upgrade version safety gate blocked: %v", err)
+			r.updateConditions(hcu)
+			r.exposePhaseMetrics(hcu, uHC, 7)
+			if !reflect.DeepEqual(originalStatus, &hcu.Status) {
+				return ctrl.Result{}, r.Status().Update(ctx, hcu)
+			}
+			return ctrl.Result{}, nil
+		}
+	}
+
 	// 4. Aggregate ControlPlaneComponent status (for SRE observability)
 	expectedCPVer, _ := upgradev1alpha1.ExtractVersion(hcu.Status.ControlPlaneStatus.TargetReleaseImage)
 	err = r.aggregateControlPlaneStatus(ctx, hcu, expectedCPVer)
@@ -451,8 +470,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		if nextReleaseImage == "" {
-			hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingNodePools
-			hcu.Status.Message = "Hosted Control Plane is already at target version. Initiating NodePool rollouts."
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+			hcu.Status.Phase = upgradev1alpha1.PhaseVerifyingControlPlane
+			hcu.Status.Message = "Hosted Control Plane is already at target version. Verifying component readiness."
 			break
 		}
 
