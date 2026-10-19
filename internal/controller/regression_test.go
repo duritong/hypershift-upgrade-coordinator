@@ -54,6 +54,10 @@ func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts .
 	for _, obj := range c.objects {
 		u, ok := obj.(*unstructured.Unstructured)
 		if ok && u.GroupVersionKind() == list.GroupVersionKind() && (options.Namespace == "" || u.GetNamespace() == options.Namespace) {
+			cluster, _, _ := unstructured.NestedString(u.Object, "spec", "clusterName")
+			if options.FieldSelector != nil && !options.FieldSelector.Matches(fields.Set{nodePoolClusterField: cluster}) {
+				continue
+			}
 			list.Items = append(list.Items, *u.DeepCopy())
 		}
 	}

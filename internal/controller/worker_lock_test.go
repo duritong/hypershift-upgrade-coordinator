@@ -322,7 +322,7 @@ func TestWorkerUserUnpauseDoesNotInventStepStart(t *testing.T) {
 func TestWorkerFuturePauseCannotHidePreexistingRollout(t *testing.T) {
 	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 	hcu.UID = "upgrade-uid"
-	paused, other := regressionNP("paused", ""), regressionNP("other", "")
+	paused, other := regressionNP("a-paused", ""), regressionNP("z-other", "")
 	_ = unstructured.SetNestedField(paused.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedField(paused.Object, time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "spec", "pausedUntil")
 	c := &regressionClient{objects: append([]client.Object{paused}, quiescentWorkerFixtures(other)...)}

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -841,9 +842,7 @@ func restoreNodePoolLock(np *unstructured.Unstructured, hcu *upgradev1alpha1.Hos
 
 // lockClusterNodePools pauses all NodePools belonging to the cluster during control plane transitions.
 func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade) error {
-	uNPList := &unstructured.UnstructuredList{}
-	uNPList.SetGroupVersionKind(gvkNP)
-	err := r.List(ctx, uNPList, client.InNamespace(hcu.Namespace))
+	uNPList, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name)
 	if err != nil {
 		return err
 	}
@@ -922,9 +921,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 	targetVer, _ := upgradev1alpha1.ExtractVersion(hcu.Spec.TargetReleaseImage)
 	// Read through the informer-backed client so deletion and version changes also
 	// refresh worker gauges while the coordinator is paused or already completed.
-	pools := &unstructured.UnstructuredList{}
-	pools.SetGroupVersionKind(gvkNP)
-	if err := r.List(ctx, pools, client.InNamespace(hcu.Namespace)); err == nil {
+	if pools, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name); err == nil {
 		metricNodePoolBlocked.DeletePartialMatch(labels)
 		metricNodePoolRolloutRatio.DeletePartialMatch(labels)
 		metricAggregatedNodeRolloutRatio.DeletePartialMatch(labels)
@@ -1022,10 +1019,8 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, uHC *unstructured.Unstructured) (bool, time.Duration, error) {
 	reqLogger := log.FromContext(ctx)
 
-	// 1. Fetch ALL NodePools inside the HostedCluster namespace (e.g. "default")
-	uNPList := &unstructured.UnstructuredList{}
-	uNPList.SetGroupVersionKind(gvkNP)
-	err := r.List(ctx, uNPList, client.InNamespace(hcu.Namespace))
+	// Fetch associated NodePools in stable name order through the cache index.
+	uNPList, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name)
 	if err != nil {
 		return false, 0, err
 	}
@@ -1550,6 +1545,9 @@ func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) erro
 
 	uNP := &unstructured.Unstructured{}
 	uNP.SetGroupVersionKind(gvkNP)
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), uNP, nodePoolClusterField, nodePoolClusterIndex); err != nil {
+		return err
+	}
 	uHCP := &unstructured.Unstructured{}
 	uHCP.SetGroupVersionKind(gvkHCP)
 	uMD := &unstructured.Unstructured{}
@@ -1838,6 +1836,7 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 		return err
 	}
 
+	sort.Slice(uList.Items, func(i, j int) bool { return uList.Items[i].GetName() < uList.Items[j].GetName() })
 	components := make([]upgradev1alpha1.ControlPlaneComponentStatus, len(uList.Items))
 	hcp := &unstructured.Unstructured{}
 	hcp.SetGroupVersionKind(gvkHCP)

@@ -44,6 +44,7 @@ import (
 
 var cfg *rest.Config
 var k8sClient client.Client
+var managerClient client.Client
 var testEnv *envtest.Environment
 var ctx context.Context
 var cancel context.CancelFunc
@@ -92,12 +93,14 @@ var _ = BeforeSuite(func() {
 	// Initialize and start the Controller Manager to run our Reconciler in real-time
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
+		Client: client.Options{Cache: &client.CacheOptions{Unstructured: true}},
 		Metrics: metricsserver.Options{
 			BindAddress: "0",
 		},
 	})
 	Expect(err).NotTo(HaveOccurred())
 
+	managerClient = mgr.GetClient()
 	err = (&HostedClusterUpgradeReconciler{
 		Client:                 mgr.GetClient(),
 		APIReader:              mgr.GetAPIReader(),

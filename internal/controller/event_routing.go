@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -10,6 +11,26 @@ import (
 )
 
 const controlPlaneNamespaceField = "controlPlaneNamespace"
+const nodePoolClusterField = "spec.clusterName"
+
+func nodePoolClusterIndex(obj client.Object) []string {
+	np := obj.(*unstructured.Unstructured)
+	cluster, _, _ := unstructured.NestedString(np.Object, "spec", "clusterName")
+	if cluster == "" {
+		return nil
+	}
+	return []string{cluster}
+}
+
+func (r *HostedClusterUpgradeReconciler) listClusterNodePools(ctx context.Context, namespace, cluster string) (*unstructured.UnstructuredList, error) {
+	pools := &unstructured.UnstructuredList{}
+	pools.SetGroupVersionKind(gvkNP)
+	if err := r.List(ctx, pools, client.InNamespace(namespace), client.MatchingFields{nodePoolClusterField: cluster}); err != nil {
+		return nil, err
+	}
+	sort.Slice(pools.Items, func(i, j int) bool { return pools.Items[i].GetName() < pools.Items[j].GetName() })
+	return pools, nil
+}
 
 func (r *HostedClusterUpgradeReconciler) mapWorkerToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
 	// The upstream annotation identifies the NodePool, not the HostedCluster.
