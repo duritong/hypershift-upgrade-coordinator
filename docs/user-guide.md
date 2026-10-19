@@ -189,6 +189,29 @@ oc patch hostedclusterupgrade production-cluster-01 -n clusters --type=merge -p 
 
 ---
 
+### Independent NodePool Pauses
+
+A NodePool's own `spec.pausedUntil` is independent of the coordinator pause.
+Unannotated `"true"` pauses are user-owned and are never automatically adopted or
+cleared. Future RFC3339 pauses block worker rollout until expiry; NodePool status
+reports the blocker and countdown, and reconciliation is scheduled for expiry.
+
+During control-plane work, the coordinator may temporarily extend a timed pause
+to `"true"` so it cannot expire before workers are eligible. It records the HCU UID
+in `upgrade.huc.0xshift.dev/worker-lock-owner` and the exact original pause in
+`upgrade.huc.0xshift.dev/worker-lock-original-pause`. Worker selection restores that
+original value, including an absent field or an expired timestamp. Already-ready
+pools also have their coordinator locks restored. Foreign-owned locks block
+progress rather than being adopted. Failure to acquire worker locks prevents
+control-plane mutation.
+
+Changing a coordinator-locked pool to a different pause value preserves your new
+value. To replace its `"true"` lock with your own identical `"true"` pause, remove
+both lock annotations in the same update: writing the same value alone is not an
+observable ownership change. Do not manage these annotations as GitOps desired
+state. Pausing the coordinator remains observe-only and does not release locks or
+cancel rollouts already started by HyperShift.
+
 ### Troubleshooting Blocked Node Drains
 If a worker NodePool rollout stalls, the coordinator automatically scrapes the logs of the `hosted-cluster-config-operator` (HCCO) inside the target control plane namespace. 
 

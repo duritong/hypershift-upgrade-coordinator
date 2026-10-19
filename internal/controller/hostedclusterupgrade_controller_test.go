@@ -344,7 +344,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npA.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "infra",
 			})
-			_ = unstructured.SetNestedField(npA.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(npA.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npA)).To(Succeed())
 
 			defer func() {
@@ -355,7 +355,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npB.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "compute",
 			})
-			_ = unstructured.SetNestedField(npB.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(npB.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npB)).To(Succeed())
 
 			defer func() {
@@ -366,7 +366,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npC.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "compute",
 			})
-			_ = unstructured.SetNestedField(npC.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(npC.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npC)).To(Succeed())
 
 			defer func() {
@@ -374,7 +374,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			}()
 
 			npD := createAndSetStatusNodePool(ctx, "pool-d", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-			_ = unstructured.SetNestedField(npD.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(npD.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npD)).To(Succeed())
 
 			defer func() {
@@ -526,7 +526,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 			// Create a NodePool with status.version = "4.20.44" (semver string, NOT pullspec!)
 			np := createAndSetStatusNodePool(ctx, "pool-semver", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-			_ = unstructured.SetNestedField(np.Object, "true", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, np)).To(Succeed())
 
 			_ = unstructured.SetNestedField(np.Object, "4.20.44", "status", "version")

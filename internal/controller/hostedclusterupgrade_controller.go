@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -383,7 +384,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 		// Ensure all NodePools are locked before progressing past preflight
 		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
-			reqLogger.Error(err, "Failed to lock NodePools during preflight")
+			return ctrl.Result{}, fmt.Errorf("lock NodePools during preflight: %w", err)
 		}
 
 		hcu.Status.Phase = upgradev1alpha1.PhasePendingSchedule
@@ -445,7 +446,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 		// Ensure all NodePools are locked during CP upgrade to protect version skew
 		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
-			reqLogger.Error(err, "Failed to lock NodePools during CP upgrade")
+			return ctrl.Result{}, fmt.Errorf("lock NodePools during CP upgrade: %w", err)
 		}
 
 		_, currentVer := GetHostedClusterCurrentRelease(uHC)
@@ -692,6 +693,59 @@ func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.H
 	meta.SetStatusCondition(&hcu.Status.Conditions, failingCond)
 }
 
+const (
+	workerLockOwner    = "upgrade.huc.0xshift.dev/worker-lock-owner"
+	workerLockOriginal = "upgrade.huc.0xshift.dev/worker-lock-original-pause"
+)
+
+// nodePoolPause reads the effective user pause, not the temporary coordinator lock.
+// JSON null preserves absence separately from an explicitly empty string.
+func nodePoolPause(np *unstructured.Unstructured, hcu *upgradev1alpha1.HostedClusterUpgrade) (*string, bool, error) {
+	value, found, err := unstructured.NestedString(np.Object, "spec", "pausedUntil")
+	if err != nil {
+		return nil, false, err
+	}
+	var pause *string
+	if found {
+		pause = &value
+	}
+	annotations := np.GetAnnotations()
+	owner, locked := annotations[workerLockOwner]
+	if !locked {
+		return pause, false, nil
+	}
+	if owner != string(hcu.UID) {
+		return pause, false, fmt.Errorf("NodePool %q has a foreign coordinator lock owned by %q", np.GetName(), owner)
+	}
+	if value != "true" {
+		// A user replaced our lock. Never restore over their new value.
+		return pause, true, nil
+	}
+	if err := json.Unmarshal([]byte(annotations[workerLockOriginal]), &pause); err != nil {
+		return nil, false, fmt.Errorf("NodePool %q has invalid original pause: %w", np.GetName(), err)
+	}
+	return pause, true, nil
+}
+
+// restoreNodePoolLock only modifies the in-memory object; callers persist it with
+// the release change in one optimistic-concurrency-protected update.
+func restoreNodePoolLock(np *unstructured.Unstructured, hcu *upgradev1alpha1.HostedClusterUpgrade) (bool, error) {
+	pause, owned, err := nodePoolPause(np, hcu)
+	if err != nil || !owned {
+		return false, err
+	}
+	if pause == nil {
+		unstructured.RemoveNestedField(np.Object, "spec", "pausedUntil")
+	} else {
+		_ = unstructured.SetNestedField(np.Object, *pause, "spec", "pausedUntil")
+	}
+	annotations := np.GetAnnotations()
+	delete(annotations, workerLockOwner)
+	delete(annotations, workerLockOriginal)
+	np.SetAnnotations(annotations)
+	return true, nil
+}
+
 // lockClusterNodePools pauses all NodePools belonging to the cluster during control plane transitions.
 func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade) error {
 	uNPList := &unstructured.UnstructuredList{}
@@ -704,12 +758,34 @@ func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Contex
 	for _, item := range uNPList.Items {
 		clusterRef, found, _ := unstructured.NestedString(item.Object, "spec", "clusterName")
 		if found && clusterRef == hcu.Name {
-			pUntil, _, _ := unstructured.NestedString(item.Object, "spec", "pausedUntil")
-			if pUntil != "true" && pUntil != "True" {
-				_ = unstructured.SetNestedField(item.Object, "true", "spec", "pausedUntil")
-				if err := r.Update(ctx, &item); err != nil {
-					return err
+			pause, owned, err := nodePoolPause(&item, hcu)
+			if err != nil {
+				return err
+			}
+			if owned {
+				current, _, _ := unstructured.NestedString(item.Object, "spec", "pausedUntil")
+				if current != "true" {
+					return fmt.Errorf("NodePool %q coordinator lock was replaced", item.GetName())
 				}
+				continue
+			}
+			if pause != nil && strings.EqualFold(strings.TrimSpace(*pause), "true") {
+				continue
+			}
+			if _, _, err := checkPausedState(pause); err != nil {
+				return err
+			}
+			original, _ := json.Marshal(pause)
+			annotations := item.GetAnnotations()
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			annotations[workerLockOwner] = string(hcu.UID)
+			annotations[workerLockOriginal] = string(original)
+			item.SetAnnotations(annotations)
+			_ = unstructured.SetNestedField(item.Object, "true", "spec", "pausedUntil")
+			if err := r.Update(ctx, &item); err != nil {
+				return err
 			}
 		}
 	}
@@ -946,6 +1022,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		group       string
 		startAt     *time.Time
 		pausedUntil string
+		paused      bool
+		pauseDelay  time.Duration
+		pauseErr    error
+		ownedLock   bool
 		version     string
 	}
 
@@ -963,6 +1043,11 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		}
 
 		pUntil, _, _ := unstructured.NestedString(np.Object, "spec", "pausedUntil")
+		userPause, ownedLock, pauseErr := nodePoolPause(&np, hcu)
+		paused, pauseDelay, parseErr := checkPausedState(userPause)
+		if pauseErr == nil {
+			pauseErr = parseErr
+		}
 		version, _, _ := unstructured.NestedString(np.Object, "status", "version")
 
 		startAt := groupSchedules[groupName]
@@ -973,6 +1058,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			group:       groupName,
 			startAt:     startAt,
 			pausedUntil: pUntil,
+			paused:      paused,
+			pauseDelay:  pauseDelay,
+			pauseErr:    pauseErr,
+			ownedLock:   ownedLock,
 			version:     version,
 		}
 
@@ -1005,6 +1094,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 
 	groupUpgradeTriggered := false
+	pauseBlocked := false
 	var shortestRequeue time.Duration
 	allCompleted := true
 	priorGroupsCompleted := true
@@ -1035,7 +1125,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				!updVer &&
 				(rCount == 0 || (uCount >= rCount && rdyCount >= rCount))
 
-			if npSpecRelease == targetReleaseImage && np.pausedUntil != "true" && np.pausedUntil != "True" && !isDone {
+			if npSpecRelease == targetReleaseImage && np.pausedUntil != "true" && !np.paused && np.pauseErr == nil && !isDone {
 				activeUpgrades++
 			}
 		}
@@ -1070,10 +1160,34 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				!updatingVersion &&
 				(replicas == 0 || (updatedReplicas >= replicas && readyReplicas >= replicas))
 
-			if isUpgraded {
+			if np.pauseErr != nil {
+				pauseBlocked = true
+				phase = "Blocked"
+				blockers = append(blockers, np.pauseErr.Error())
+				groupCompleted = false
+			} else if isUpgraded {
+				if changed, err := restoreNodePoolLock(&np.object, hcu); err != nil {
+					return false, 0, err
+				} else if changed {
+					if err := r.Update(ctx, &np.object); err != nil {
+						return false, 0, err
+					}
+				}
 				startTime = nil
 				phase = "Completed"
 				reqLogger.Info("NodePool upgrade already complete", "name", np.name)
+			} else if np.paused {
+				pauseBlocked = true
+				phase = "Blocked"
+				groupCompleted = false
+				message := "NodePool independently paused indefinitely"
+				if np.pauseDelay > 0 {
+					message = fmt.Sprintf("NodePool independently paused; resumes in %s", np.pauseDelay.Round(time.Second))
+					if shortestRequeue == 0 || np.pauseDelay < shortestRequeue {
+						shortestRequeue = np.pauseDelay
+					}
+				}
+				blockers = append(blockers, message)
 			} else if preflightErr != nil {
 				phase = "Blocked"
 				blockers = append(blockers, fmt.Sprintf("Cluster health degraded: %v", preflightErr))
@@ -1095,7 +1209,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 					}
 				} else {
 					// Schedule is open. Trigger Upgrade (subject to concurrency limits or existing in-flight upgrades)
-					isAlreadyUpgrading := npSpecRelease == targetReleaseImage && np.pausedUntil != "true" && np.pausedUntil != "True"
+					isAlreadyUpgrading := npSpecRelease == targetReleaseImage && np.pausedUntil != "true"
 
 					if isAlreadyUpgrading || activeUpgrades < concurrency {
 						phase = "Upgrading"
@@ -1103,19 +1217,24 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 						reqLogger.Info("Diagnostic compare values", "name", np.name, "npSpecRelease", npSpecRelease, "targetRelease", targetReleaseImage)
 
-						if npSpecRelease != targetReleaseImage || np.pausedUntil == "true" || np.pausedUntil == "True" {
+						if npSpecRelease != targetReleaseImage || np.ownedLock {
+							actuated := npSpecRelease != targetReleaseImage || np.pausedUntil == "true"
 							reqLogger.Info("Triggering upgrade rollout on NodePool", "name", np.name, "targetImage", targetReleaseImage)
 							_ = unstructured.SetNestedField(np.object.Object, targetReleaseImage, "spec", "release", "image")
-							_ = unstructured.SetNestedField(np.object.Object, "false", "spec", "pausedUntil")
+							if _, err := restoreNodePoolLock(&np.object, hcu); err != nil {
+								return false, 0, err
+							}
 							err = r.Update(ctx, &np.object)
 							if err != nil {
 								return false, 0, err
 							}
-							groupUpgradeTriggered = true
-							activeUpgrades++
-							if startTime == nil {
-								now := metav1.Now()
-								startTime = &now
+							if actuated {
+								groupUpgradeTriggered = true
+								activeUpgrades++
+								if startTime == nil {
+									now := metav1.Now()
+									startTime = &now
+								}
 							}
 						}
 
@@ -1169,7 +1288,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 	// Update status message with active scheduler/rollout telemetry
 	if shortestRequeue > 0 {
-		hcu.Status.Message = fmt.Sprintf("Upgrades active. Next scheduled NodePool window opens in %s.", shortestRequeue.Round(time.Second).String())
+		hcu.Status.Message = fmt.Sprintf("Worker upgrades waiting. Next schedule or user pause expires in %s.", shortestRequeue.Round(time.Second).String())
 		if shortestRequeue > 5*time.Minute {
 			shortestRequeue = 5 * time.Minute
 		}
@@ -1177,6 +1296,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 
 	hcu.Status.Message = "Worker NodePool upgrades actively rolling out."
+	if pauseBlocked {
+		hcu.Status.Message = "Worker NodePool upgrades blocked by independent pauses or lock ownership; see NodePool blockers."
+	}
 	if groupUpgradeTriggered {
 		return true, time.Second * 5, nil // Requeue quickly to observe the unpause
 	}
