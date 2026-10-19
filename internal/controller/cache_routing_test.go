@@ -74,7 +74,11 @@ func TestCacheIterationStatusOrder(t *testing.T) {
 			t.Fatalf("status not sorted: %+v", hcu.Status)
 		}
 		if i > 0 && !reflect.DeepEqual(previous, hcu.Status) {
-			t.Fatalf("iteration order changed status:\n%+v\n%+v", previous, hcu.Status)
+			// Observation attempt time is intentionally fresh, not cache ordering.
+			previous.GuestAssessment.LastAttemptTime = hcu.Status.GuestAssessment.LastAttemptTime
+			if !reflect.DeepEqual(previous, hcu.Status) {
+				t.Fatalf("iteration order changed status:\n%+v\n%+v", previous, hcu.Status)
+			}
 		}
 		previous = *hcu.Status.DeepCopy()
 		c.objects[0], c.objects[1] = c.objects[1], c.objects[0]

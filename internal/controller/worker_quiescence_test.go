@@ -17,11 +17,11 @@ func TestWorkerPrerequisiteRequiresQuiescenceAfterLock(t *testing.T) {
 	md := readyWorkerFixture(np, regressionImage("4.20.0"))
 	c := &regressionClient{objects: []client.Object{np, md}}
 	addReadyCP(c, regressionHC("4.21.0"))
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu)}
 	if err := r.WorkerPrerequisite(context.Background(), hcu); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+	if err := r.lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(np), np); err != nil {
@@ -66,7 +66,7 @@ func TestWorkerDynamicEnrollmentLocksQuiescentPools(t *testing.T) {
 	mdLater := readyWorkerFixture(later, regressionImage("4.20.0"))
 	c := &regressionClient{objects: []client.Object{a, later, mdA, mdLater}}
 	addReadyCP(c, regressionHC("4.21.0"))
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu)}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestWorkerExternalRolloutBlocksNewWorkAcrossGroups(t *testing.T) {
 	_ = unstructured.SetNestedSlice(external.Object, []interface{}{map[string]interface{}{"type": "UpdatingVersion", "status": "True"}}, "status", "conditions")
 	c := &regressionClient{objects: []client.Object{a, external, md}}
 	addReadyCP(c, regressionHC("4.21.0"))
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu)}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestWorkerKnownRolloutWithExternalSpecChangeBlocksNewWork(t *testing.T) {
 	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "a", Phase: "Upgrading", TargetReleaseImage: hcu.Spec.TargetReleaseImage}}
 	c := &regressionClient{objects: append([]client.Object{a}, quiescentWorkerFixtures(b)...)}
 	addReadyCP(c, regressionHC("4.21.0"))
-	r := &HostedClusterUpgradeReconciler{Client: c}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu)}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +140,8 @@ func TestOwnedLockCanHoldPendingConfiguration(t *testing.T) {
 			md := readyWorkerFixture(np, regressionImage("4.20.0"))
 			c := &regressionClient{objects: []client.Object{np, md}}
 			addReadyCP(c, regressionHC("4.21.0"))
-			r := &HostedClusterUpgradeReconciler{Client: c}
-			if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+			r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu), GuestAccess: legacyGuest(c, hcu, nil)}
+			if err := r.lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)
 			}
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(np), np); err != nil {

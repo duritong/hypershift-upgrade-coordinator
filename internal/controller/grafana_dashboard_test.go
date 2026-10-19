@@ -93,6 +93,14 @@ func TestGrafanaDashboard(t *testing.T) {
 		{8, "Blocked NodePools", "table", []string{
 			`hypershift_upgrade_nodepool_blocked{current_version=~"$current_version", target_version=~"$target_version"} == 1`,
 		}},
+		{9, "Observer Credential Availability", "table", []string{`hypershift_upgrade_guest_credential_available and on(namespace, name) ` + phase}},
+		{10, "Guest Access Maintenance Ready", "table", []string{`hypershift_upgrade_guest_access_maintenance_ready and on(namespace, name) ` + phase}},
+		{11, "Latest Guest Purpose Verdict", "table", []string{`hypershift_upgrade_guest_assessment{purpose=~"$guest_purpose"} and on(namespace, name) ` + phase}},
+		{12, "Scoped Guest Read Age", "table", []string{`(time() - hypershift_upgrade_guest_last_successful_observation_timestamp_seconds) and on(namespace, name) ` + phase}},
+		{13, "Observer Credential Remaining Lifetime", "table", []string{`(hypershift_upgrade_guest_credential_expiration_timestamp_seconds - time()) and on(namespace, name) ` + phase}},
+		{14, "Guest Assessment Blocker Count", "table", []string{`hypershift_upgrade_guest_blocker_count and on(namespace, name) ` + phase}},
+		{15, "Guest Operator Blockers", "table", []string{`hypershift_upgrade_guest_operator_blocker{purpose=~"$guest_purpose"} and on(namespace, name) ` + phase}},
+		{16, "Assessed Guest Operator Count", "table", []string{`hypershift_upgrade_guest_operator_count and on(namespace, name) ` + phase}},
 	}
 	for _, contract := range contracts {
 		t.Run(contract.title, func(t *testing.T) {
@@ -128,6 +136,9 @@ func TestGrafanaDashboard(t *testing.T) {
 			}
 		})
 	}
+	if len(dashboard.Panels) != len(contracts) {
+		t.Fatalf("unexpected dashboard panels: %d", len(dashboard.Panels))
+	}
 	t.Run("datasource and version variables", func(t *testing.T) {
 		variables := make(map[string]bool)
 		for _, variable := range dashboard.Templating.List {
@@ -150,8 +161,14 @@ func TestGrafanaDashboard(t *testing.T) {
 					t.Errorf("version variable %s does not use selected datasource", variable.Name)
 				}
 			}
+			if variable.Name == "guest_purpose" {
+				query, ok := variable.Query.(map[string]any)
+				if variable.Type != "query" || !ok || query["query"] != "label_values(hypershift_upgrade_guest_assessment, purpose)" || variable.Datasource != (datasource{Type: "prometheus", UID: "${datasource}"}) {
+					t.Errorf("invalid guest purpose variable: %+v", variable)
+				}
+			}
 		}
-		for _, name := range []string{"datasource", "current_version", "target_version"} {
+		for _, name := range []string{"datasource", "current_version", "target_version", "guest_purpose"} {
 			if !variables[name] {
 				t.Errorf("missing template variable %s", name)
 			}

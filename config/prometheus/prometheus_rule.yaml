@@ -7,6 +7,38 @@ spec:
   groups:
   - name: hypershift-upgrade-coordinator.alerts
     rules:
+    - alert: HypershiftUpgradeGuestCredentialUnavailable
+      expr: (hypershift_upgrade_guest_credential_available == 0) and on(namespace, name) (((hypershift_upgrade_phase >= 2) and (hypershift_upgrade_phase <= 5)) or (hypershift_upgrade_phase == 7))
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Observer credential unavailable during upgrade"
+        description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' lacks a reported unexpired observer credential. Inspect guestAccess and source admin kubeconfig, endpoint TLS and ownership; no admin observation fallback exists."
+    - alert: HypershiftUpgradeGuestMaintenanceDegraded
+      expr: (hypershift_upgrade_guest_access_maintenance_ready == 0) and on(namespace, name) (((hypershift_upgrade_phase >= 2) and (hypershift_upgrade_phase <= 5)) or (hypershift_upgrade_phase == 7))
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Observer credential maintenance degraded"
+        description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' cannot maintain access. A still-valid old credential can remain usable until expiration. Inspect status.guestAccess.reason."
+    - alert: HypershiftUpgradeGuestReadStale
+      expr: (time() - hypershift_upgrade_guest_last_successful_observation_timestamp_seconds > 120) and on(namespace, name) (((hypershift_upgrade_phase >= 2) and (hypershift_upgrade_phase <= 5)) or (hypershift_upgrade_phase == 7))
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Scoped guest observations stale or absent"
+        description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' has no recent complete scoped collection. Successful reads include unhealthy results; this alert is about read freshness, not operator health."
+    - alert: HypershiftUpgradeGuestAssessmentBlocked
+      expr: (hypershift_upgrade_guest_assessment{state=~"Unhealthy|Unavailable|AccessDenied|IdentityMismatch|UnsupportedEvidence|Stale|Invalidated|NotAssessed|Unknown"} == 1) and on(namespace, name) (((hypershift_upgrade_phase >= 2) and (hypershift_upgrade_phase <= 5)) or (hypershift_upgrade_phase == 7))
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Guest purpose assessment cannot pass"
+        description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' reports {{ $labels.state }} for {{ $labels.purpose }} ({{ $labels.reason }}). Inspect guestAssessment; delegated rollouts are not cancelled. This does not query guest firing alerts."
     - alert: HypershiftUpgradeCoordinatorBlocked
       expr: hypershift_upgrade_phase == 7
       for: 15m

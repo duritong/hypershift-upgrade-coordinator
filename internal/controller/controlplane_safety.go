@@ -7,6 +7,7 @@ import (
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -146,55 +147,71 @@ func plannedControlPlaneRelease(hc *unstructured.Unstructured, hcu *upgradev1alp
 }
 
 func (r *HostedClusterUpgradeReconciler) verifyControlPlane(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured, image string) error {
+	_, err := r.verifyControlPlaneProof(ctx, hcu, hc, image)
+	return err
+}
+
+// A proof describes the exact objects used by management verification, not fresh
+// metadata sampled later. It stays local to one gate/action, never a reconciler.
+type managementProof struct {
+	hcUID, hcpUID               types.UID
+	hcGeneration, hcpGeneration int64
+}
+
+func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured, image string) (managementProof, error) {
+	var proof managementProof
+	if hc.GetUID() == "" || hc.GetGeneration() < 1 {
+		return proof, fmt.Errorf("HostedCluster identity/generation unavailable")
+	}
 	if err := upgradev1alpha1.RejectControlPlaneReleaseOverride(hc); err != nil {
-		return err
+		return proof, err
 	}
 	if installing, err := r.checkClusterInstallingAndHealth(hc); err != nil {
-		return err
+		return proof, err
 	} else if installing {
-		return fmt.Errorf("HostedCluster installation is not complete")
+		return proof, fmt.Errorf("HostedCluster installation is not complete")
 	}
 	version, err := upgradev1alpha1.ExtractVersion(image)
 	if err != nil {
 		baseline, baselineVersion := GetHostedClusterCurrentRelease(hc)
 		if !samePayload(baseline, image) || baselineVersion == "" {
-			return err
+			return proof, err
 		}
 		version = baselineVersion
 	}
 	desired, _, _ := unstructured.NestedString(hc.Object, "spec", "release", "image")
 	if !samePayload(desired, image) {
-		return fmt.Errorf("HostedCluster requested payload does not match expected release")
+		return proof, fmt.Errorf("HostedCluster requested payload does not match expected release")
 	}
 	for _, field := range []string{"version", "controlPlaneVersion"} {
 		latest := latestRelease(hc, field)
 		completed, _ := latest["image"].(string)
 		if latest["state"] != "Completed" || latest["version"] != version || !samePayload(completed, image) {
-			return fmt.Errorf("waiting for latest %s Completed history with exact expected payload and version", field)
+			return proof, fmt.Errorf("waiting for latest %s Completed history with exact expected payload and version", field)
 		}
 		if requested, _, _ := unstructured.NestedString(hc.Object, "status", field, "desired", "image"); requested != "" && !samePayload(requested, image) {
-			return fmt.Errorf("%s desired payload conflicts with expected release", field)
+			return proof, fmt.Errorf("%s desired payload conflicts with expected release", field)
 		}
 	}
 	hcp := &unstructured.Unstructured{}
 	hcp.SetGroupVersionKind(gvkHCP)
 	if err := r.Get(ctx, client.ObjectKey{Namespace: WorkerControlPlaneNamespace(hcu.Namespace, hcu.Name), Name: hcu.Name}, hcp); err != nil {
-		return fmt.Errorf("waiting for HostedControlPlane: %w", err)
+		return proof, fmt.Errorf("waiting for HostedControlPlane: %w", err)
 	}
 	effective, _, _ := unstructured.NestedString(hcp.Object, "spec", "releaseImage")
 	management, found, managementErr := unstructured.NestedString(hcp.Object, "spec", "controlPlaneReleaseImage")
 	if managementErr != nil || (found && !samePayload(management, image)) {
-		return fmt.Errorf("HCP management release override conflicts with expected payload")
+		return proof, fmt.Errorf("HCP management release override conflicts with expected payload")
 	}
 	observed, _, _ := unstructured.NestedInt64(hc.Object, "status", "controlPlaneVersion", "observedGeneration")
-	if hcp.GetGeneration() < 1 || !samePayload(effective, image) || observed < hcp.GetGeneration() {
-		return fmt.Errorf("waiting for effective HCP payload and fresh management version status")
+	if hcp.GetUID() == "" || hcp.GetGeneration() < 1 || !samePayload(effective, image) || observed < hcp.GetGeneration() || !hcp.GetDeletionTimestamp().IsZero() {
+		return proof, fmt.Errorf("waiting for effective HCP payload and fresh management version status")
 	}
 	if err := r.aggregateControlPlaneStatus(ctx, hcu, version); err != nil {
-		return err
+		return proof, err
 	}
 	if hcu.Status.ControlPlaneStatus.TotalComponents == 0 || hcu.Status.ControlPlaneStatus.UpgradedComponents != hcu.Status.ControlPlaneStatus.TotalComponents {
-		return fmt.Errorf("waiting for fresh, ready control plane components at %s", version)
+		return proof, fmt.Errorf("waiting for fresh, ready control plane components at %s", version)
 	}
-	return nil
+	return managementProof{hcUID: hc.GetUID(), hcGeneration: hc.GetGeneration(), hcpUID: hcp.GetUID(), hcpGeneration: hcp.GetGeneration()}, nil
 }

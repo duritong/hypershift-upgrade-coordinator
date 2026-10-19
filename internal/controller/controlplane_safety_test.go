@@ -18,6 +18,7 @@ func readyHCP(hc *unstructured.Unstructured) *unstructured.Unstructured {
 	hcp.SetGroupVersionKind(gvkHCP)
 	hcp.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
 	hcp.SetName(hc.GetName())
+	hcp.SetUID("hcp-uid")
 	hcp.SetGeneration(1)
 	image, _, _ := unstructured.NestedString(hc.Object, "spec", "release", "image")
 	_ = unstructured.SetNestedField(hcp.Object, image, "spec", "releaseImage")
@@ -253,7 +254,7 @@ func TestWholeControlPlanePathWorkerSkew(t *testing.T) {
 				}
 				c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
 				addReadyCP(c, hc)
-				r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
+				r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, hcu, nil)}
 				_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)})
 				if (c.writes > 0) != (defect == "safe") {
 					t.Fatalf("whole path safety: %s allowed writes=%d", defect, c.writes)

@@ -2,6 +2,35 @@
 
 When deploying HyperShift clusters via GitOps, SREs define the desired state of `HostedCluster` and `NodePool` resources in Git, and ArgoCD continuously reconciles the active cluster state to match. This document provides a comprehensive integration guide for deploying clusters and coordinating automated upgrades without sync conflicts.
 
+## Mandatory Guest Verification Rollout
+
+The unreleased guest-observation implementation is enabled in the original
+workflow for every managed HCU, including existing runs. Roll out its updated CRD,
+fleet get-only Service/source Secret reads, namespace-local delivery Secret
+Role/RoleBinding, Deployment namespace environment and operator image as one
+coordinated change, before relying on new status/metrics. Keep the Role in the
+actual operator namespace; it grants whole-namespace Secret lifecycle authority.
+The packaged `OPERATOR_NAMESPACE` comes from the Pod namespace through the
+Downward API; local runs must provide it or `--operator-namespace` explicitly.
+
+Do not declare observer delivery Secret contents, fixed guest profile ownership
+annotations, `status.guestAccess`, `status.guestAssessment`, or `workerAdmission`
+as desired state in Git. Do not select alternate admin Secrets: access requires
+the current HC-published kubeconfig reference and verified guest cluster identity.
+Leave generated credentials to the access controller and avoid independent
+reconciliation/pruning of its guest profile. No cross-namespace HC owner reference
+is used for delivery Secrets; lifecycle cleanup checks source UIDs explicitly.
+
+The `ignoreDifferences` rules below delegate live HC/NodePool fields; they are
+**not** guest-check bypasses. Check skipping, operator exclusions and force flags
+are not available. Missing access or bad evidence withholds new actions without
+cancelling delegated work. Paused credential renewal can update an existing
+owned delivery Secret, but cannot bootstrap, repair RBAC or recreate missing
+resources. See [access/network prerequisites](user-guide.md#mandatory-guest-access-unreleased).
+Validate actual HyperShift API connectivity, credential rotation and upgrade
+behavior before production rollout; automated simulations are not deployed
+upgrade validation.
+
 ---
 
 ## 1. The Reconciliation Conflict Problem

@@ -282,7 +282,7 @@ func TestStepTimersDoNotStartOnFailedActuation(t *testing.T) {
 			if phase == upgradev1alpha1.PhaseUpgradingNodePools {
 				name = "workers"
 			}
-			r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: name}, ReleaseResolver: fixtureReleaseResolver{}}
+			r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: name}, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(base, hcu, nil)}
 			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)})
 			if phase == upgradev1alpha1.PhaseUpgradingControlPlane && err == nil {
 				t.Fatal("expected failed CP update")
@@ -432,10 +432,10 @@ func TestNodePoolStepTimerSurvivesLaterUpdateFailure(t *testing.T) {
 	hcu.Spec.RolloutPolicy = &upgradev1alpha1.RolloutPolicySpec{MaxParallelNodePools: 2}
 	base := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
 	addReadyCP(base, regressionHC("4.21.0"))
-	if err := (&HostedClusterUpgradeReconciler{Client: base}).lockClusterNodePools(context.Background(), hcu); err != nil {
+	if err := (&HostedClusterUpgradeReconciler{Client: base, APIReader: workerSource(base, hcu)}).lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
-	r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: "b"}, ReleaseResolver: fixtureReleaseResolver{}}
+	r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: "b"}, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(base, hcu, nil)}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err != nil {
 		t.Fatal(err)
 	}

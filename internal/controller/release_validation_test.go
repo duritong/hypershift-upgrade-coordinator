@@ -30,11 +30,15 @@ func (f releaseResolverFunc) Resolve(ctx context.Context, image string, secret [
 
 type releaseSecretReader struct {
 	client.Reader
-	reads int
-	err   error
+	reads      int
+	err        error
+	management client.Reader
 }
 
 func (r *releaseSecretReader) Get(ctx context.Context, key client.ObjectKey, out client.Object, opts ...client.GetOption) error {
+	if _, secret := out.(*corev1.Secret); !secret && r.management != nil {
+		return r.management.Get(ctx, key, out, opts...)
+	}
 	r.reads++
 	if r.err != nil {
 		return r.err
@@ -44,6 +48,9 @@ func (r *releaseSecretReader) Get(ctx context.Context, key client.ObjectKey, out
 
 func reconcileReleaseTest(t *testing.T, r *HostedClusterUpgradeReconciler, c *regressionClient, hcu *upgradev1alpha1.HostedClusterUpgrade) *upgradev1alpha1.HostedClusterUpgrade {
 	t.Helper()
+	if reader, ok := r.APIReader.(*releaseSecretReader); ok {
+		reader.management = c
+	}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,17 @@ All alerting configurations are natively managed and deployed via Kustomize. SRE
 | **HypershiftUpgradeDrainObservations** | `hypershift_upgrade_drain_observations > 0` | **Warning** | Recent cluster-level drain/eviction hints persist. Inspect `status.drainDiagnostics` and guest resources; exact NodePool/PDB ownership is not established. |
 | **HypershiftUpgradeDrainDiagnosticsUnavailable** | `hypershift_upgrade_drain_diagnostics_available == 0` | **Warning** | Best-effort collection is unavailable, not evidence of healthy drains. Rollout actions continue. |
 | **HypershiftUpgradeStepDurationLong** | `hypershift_upgrade_step_duration_seconds > 14400` | **Warning** | An individual upgrade step (e.g., Control Plane rollout) has been active for more than 4 hours. Inspect underlying component rollout readiness. |
+| **HypershiftUpgradeGuestCredentialUnavailable** | Credential availability = 0, relevant phase | **Warning, 5m** | No reported unexpired observer credential; inspect guestAccess, source kubeconfig and endpoint/ownership. |
+| **HypershiftUpgradeGuestMaintenanceDegraded** | Maintenance ready = 0, relevant phase | **Warning, 10m** | Renewal/bootstrap is failing; an existing valid token can still work until expiry. |
+| **HypershiftUpgradeGuestReadStale** | Last scoped collection older than 120s or never, relevant phase | **Warning, 5m** | Collection freshness failure, not proof of guest ill health. |
+| **HypershiftUpgradeGuestAssessmentBlocked** | Hard failure/unknown/stale purpose verdict, relevant phase | **Warning, 10m** | Inspect the latest purpose-specific assessment; healthy progression alone is not alerted. |
+
+Guest alerts are intersected with phases 2-5 or 7 using `and on(namespace, name)`:
+preflight/schedule, control-plane rollout/verification, workers and Blocked.
+Idle, Installing, Completed and Paused are excluded. These are coordinator
+evidence/access alerts, **not guest firing-alert queries**. Querying guest alert
+sets is deferred. Existing Completed outcomes remain historical; continuing
+credential maintenance does not reopen an upgrade or promise ongoing health.
 
 ---
 
@@ -41,6 +52,7 @@ durable history of completed step durations.
 | `$datasource` | Datasource (`prometheus`) | Selects the datasource used by every panel and version variable. |
 | `$current_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, current_version)` |
 | `$target_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, target_version)` |
+| `$guest_purpose` | Query, multi-select with All | `label_values(hypershift_upgrade_guest_assessment, purpose)`; filters verdict and operator-blocker panels, not credential/read-age gauges. |
 
 Version filters use the labels exported by the coordinator. `current_version`
 comes from persisted `status.initialVersion`, the upgrade run's origin version.
@@ -62,6 +74,51 @@ observable version after the coordinator is updated.
 | NodePool Upgrade Rollout Ratio Curve | Historical per-pool rollout percentages, with namespace/upgrade/pool identities in the legend. |
 | Aggregated Cluster Node Rollout Curve | Historical per-cluster worker rollout percentages. |
 | Blocked NodePools | Instant table listing matching pools whose blocked metric is 1. An empty table means no matching blocked pools are reported, not proof that every pool is healthy. |
+| Observer Credential Availability / Guest Access Maintenance Ready | Separate instant tables for credential presence/expiry and maintenance. Neither proves successful observer authentication. |
+| Latest Guest Purpose Verdict | Instant table of latest purpose/state/controlled reason. Value is 1; absence for Paused/Completed is intentional. Not an all-purpose health promise. |
+| Scoped Guest Read Age | Seconds since successful scoped collection, even when unhealthy. A never-observed timestamp is zero, producing a large age. Historical age remains visible after completion. |
+| Observer Credential Remaining Lifetime | Expiration epoch minus current time, seconds; omitted when expiration is unknown. |
+| Guest Assessment Blocker Count / Assessed Guest Operator Count | Latest fresh verdict totals; not an expected inventory or independent readiness proof. |
+| Guest Operator Blockers | At most 32 current blocker details. Old reasons/names disappear on the next metric update; removed COs disappear after the next complete collection. Absence does not prove health. |
+
+### Guest Metric Contract
+
+All guest gauges use `namespace` and HCU `name`, without version labels. Additional
+labels appear only where listed. Version filtering uses the same identity set
+intersection with the phase metric as worker ratios, **never multiplication by
+the numeric phase**. `honorLabels: true` remains required.
+
+| Metric suffix (prefix `hypershift_upgrade_guest_`) | Meaning / Extra labels |
+| :--- | :--- |
+| `credential_available` | 0/1; access status reports available and its reported expiry is still future. Missing/expired evidence is 0. Not proof of actual auth. |
+| `access_maintenance_ready` | 0/1; latest current-generation maintenance result. Renewal failure does not imply old credential rejection. |
+| `credential_expiration_timestamp_seconds` | Unix seconds; absent when unknown. Access status may omit expiry once unavailable. |
+| `last_successful_observation_timestamp_seconds` | Unix seconds of last successful collection, including unhealthy results; 0 if none recorded. Retained diagnostics can outlive current usability. |
+| `assessment_timestamp_seconds` | Unix seconds of latest attempt, or 0 if absent. Distinct from CO condition transition times. |
+| `assessment` | One current series, value 1; `purpose`, `state`, `reason`. A closed purpose/state/reason vocabulary; unrecognized reasons become `Other`. |
+| `assessment_ready` | 0/1 for latest fresh, current-plan Ready verdict; `purpose`. Requires a recent successful read; known credential expiry invalidates it. Independent of maintenance/availability booleans. Not authorization: every action still recollects/revalidates. |
+| `operator_count` | Latest fresh verdict's operator summaries, bounded to 256. Failed reads/unsupported evidence may have zero summaries; not a full-list success signal. |
+| `blocker_count` | Total latest fresh verdict blockers, including omitted details; can exceed operator count because an operator can have several blockers. |
+| `blockers_truncated` | 0/1 indicating bounded details were omitted. |
+| `operator_blocker` | Value 1 per reported detail; `purpose`, `operator`, controlled `reason`; at most 32 details, no version label. CV-wide blockers appear only in aggregate/status. |
+
+The exporter does not retain an operator inventory or count unchanged failures
+each reconcile. No new counters are introduced. It replaces its owned series on
+each update, so failed/partial reads do not retain prior per-operator results.
+Verdicts older than 30 seconds become `Stale`; changed HCU generation/plan becomes
+`Invalidated`. Fresh Ready additionally needs a recent successful read and is
+invalidated by known credential expiry. Access-maintenance/availability booleans
+do not substitute for the scoped result. Missing assessment is `NotAssessed`. Detailed reasons stay
+in status, not metric labels. No UID, revision, hash, URL, credential, version or
+raw message is added to guest labels.
+
+Active verdict/count/blocker series are omitted for Paused/Completed; credential
+and diagnostic timestamp gauges remain. All guest gauges are removed on HCU
+deletion. Metrics are refreshed by reconciliation, not evaluated independently at
+scrape time: allow the existing 30-second non-completed heartbeat plus scrape
+latency. Alert expressions use `time()` for read age. Stale data or a process
+outage also needs normal Prometheus target-down monitoring; these gauges do not
+replace it.
 
 Current-state tables use `instant: true`, `range: false`, and `format: "table"`. The fleet state table uses only the phase metric, so its labels and value form one table without cross-query joins or transformations. Component and blocked-pool tables likewise use a single instant query. Only the rollout curves use range queries.
 
@@ -105,3 +162,8 @@ can report the wrong cluster namespace and dashboard identity joins are invalid.
 ### Regression Validation
 
 Run `go test ./internal/controller -run '^TestGrafanaDashboard$' -count=1` to validate the JSON, datasource wiring, version variables, complete query contracts, worker label selectors, instant/table versus range query modes, blocked-pool panel, and refresh cadence without starting the controller envtest suite. These are static dashboard contract tests, not live Prometheus query evaluation or Grafana rendering tests.
+
+`go test ./internal/controller -run '^(TestGuestMetrics.*|TestGuestAlertRules|TestGrafanaDashboard|TestGuestAccessManagementRBAC|TestScrapePreservesUpgradeNamespace)$' -count=1`
+also checks metric lifecycle/invalidation, namespace-local RBAC and guest alert
+contracts. Rule/dashboard expression checks are static string/schema contracts,
+not a PromQL execution engine or proof of live alert firing/Grafana rendering.

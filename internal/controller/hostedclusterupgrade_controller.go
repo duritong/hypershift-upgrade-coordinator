@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -37,6 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -46,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
+	"github.com/duritong/hypershift-upgrade-coordinator/internal/guest"
 )
 
 // LogScraper defines an interface for fetching HCCO logs (allows mock testing).
@@ -113,11 +116,13 @@ func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix s
 // HostedClusterUpgradeReconciler reconciles a HostedClusterUpgrade object
 type HostedClusterUpgradeReconciler struct {
 	client.Client
-	APIReader              client.Reader // Uncached, get-only access to HC pull secrets.
+	APIReader              client.Reader // Uncached status/identity fences and get-only source Secret access.
 	ReleaseResolver        ReleaseMetadataResolver
 	Scheme                 *runtime.Scheme
 	HostedClusterNamespace string
-	LogScraper             LogScraper // Injectable log scraper for testing
+	LogScraper             LogScraper        // Injectable log scraper for testing
+	Clock                  Clock             // Nil uses real wall time.
+	GuestAccess            GuestAccessReader // Required; nil fails closed at every guest gate.
 }
 
 // Official GVKs from HyperShift API schema
@@ -234,7 +239,13 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	// 1. Fetch the HostedClusterUpgrade object
 	hcu := &upgradev1alpha1.HostedClusterUpgrade{}
-	err := r.Get(ctx, req.NamespacedName, hcu)
+	// Rebased status persistence must never replay our own stale cached status.
+	// The access writer may independently advance resourceVersion at any time.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, req.NamespacedName, hcu)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			clearUpgradeGauges(req.Namespace, req.Name)
@@ -285,7 +296,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	originalStatus := hcu.Status.DeepCopy()
 
 	// 2. Check Coordinator Pause State (spec.pausedUntil)
-	isPaused, pausedRequeueAfter, err := checkPausedState(hcu.Spec.PausedUntil)
+	isPaused, pausedRequeueAfter, err := checkPausedState(hcu.Spec.PausedUntil, r.now())
 	if err != nil {
 		reqLogger.Error(err, "Failed to parse spec.pausedUntil")
 		markUpgradeBlocked(hcu)
@@ -297,7 +308,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		r.updateConditions(hcu)
 
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+			if statusErr := r.persistUpgradeStatus(ctx, hcu); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 		}
@@ -321,6 +332,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		if uHC != nil && hcu.Status.InitialVersion == "" {
 			_, hcu.Status.InitialVersion = GetHostedClusterCurrentRelease(uHC)
 		}
+		r.observeGuest(ctx, hcu, uHC)
 
 		expectedCPVer, _ := upgradev1alpha1.ExtractVersion(hcu.Status.ControlPlaneStatus.TargetReleaseImage)
 		_ = r.aggregateControlPlaneStatus(ctx, hcu, expectedCPVer)
@@ -335,7 +347,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			err = r.Status().Update(ctx, hcu)
+			err = r.persistUpgradeStatus(ctx, hcu)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -361,7 +373,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 			r.updateConditions(hcu)
 			if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-				if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+				if statusErr := r.persistUpgradeStatus(ctx, hcu); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}
 			}
@@ -382,7 +394,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		r.updateConditions(hcu)
 		r.exposePhaseMetrics(ctx, hcu, uHC)
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.persistUpgradeStatus(ctx, hcu)
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -397,7 +409,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			r.updateConditions(hcu)
 			r.exposePhaseMetrics(ctx, hcu, uHC)
 			if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, r.persistUpgradeStatus(ctx, hcu)
 			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
@@ -409,7 +421,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		r.updateConditions(hcu)
 		r.exposePhaseMetrics(ctx, hcu, uHC)
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.persistUpgradeStatus(ctx, hcu)
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -420,7 +432,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		r.updateConditions(hcu)
 		r.exposePhaseMetrics(ctx, hcu, uHC)
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			if err := r.Status().Update(ctx, hcu); err != nil {
+			if err := r.persistUpgradeStatus(ctx, hcu); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -450,7 +462,14 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			completedImage, _ = GetHostedClusterCurrentRelease(uHC)
 		}
 		if completedImage != hcu.Spec.TargetReleaseImage {
-			hcu.Status = upgradev1alpha1.HostedClusterUpgradeStatus{}
+			access := hcu.Status.GuestAccess
+			var foreign []metav1.Condition
+			for _, c := range hcu.Status.Conditions {
+				if !upgradeCondition(c.Type) {
+					foreign = append(foreign, c)
+				}
+			}
+			hcu.Status = upgradev1alpha1.HostedClusterUpgradeStatus{GuestAccess: access, Conditions: foreign}
 			_, hcu.Status.InitialVersion = GetHostedClusterCurrentRelease(uHC)
 		}
 	}
@@ -461,11 +480,14 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	// Set Start Time once we move past Idle
 	if hcu.Status.Phase != upgradev1alpha1.PhaseIdle && hcu.Status.StartTime == nil {
-		now := metav1.Now()
+		now := metav1.NewTime(r.now())
 		hcu.Status.StartTime = &now
 	}
 
 	var stateRequeueAfter time.Duration
+	if hcu.Status.Phase == upgradev1alpha1.PhasePendingSchedule || hcu.Status.Phase == upgradev1alpha1.PhaseInstalling || hcu.Status.Phase == upgradev1alpha1.PhaseUpgradingNodePools {
+		r.observeGuest(ctx, hcu, uHC)
+	}
 
 	switch hcu.Status.Phase {
 	case upgradev1alpha1.PhaseIdle:
@@ -485,6 +507,28 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		if isInstalling {
 			hcu.Status.Phase = upgradev1alpha1.PhaseInstalling
 			hcu.Status.Message = "HostedCluster is currently in initial installation. Waiting for completion."
+			break
+		}
+
+		// Adopt compatible already-target control planes without demanding a
+		// historical source baseline or relocking delegated worker rollouts.
+		requested, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+		if samePayload(requested, hcu.Spec.TargetReleaseImage) {
+			if err := r.verifyControlPlane(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage); err != nil {
+				hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+				hcu.Status.Phase = upgradev1alpha1.PhaseVerifyingControlPlane
+				hcu.Status.Message = err.Error()
+				break
+			}
+			target, err := r.guestGate(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage, guest.Policy{Purpose: guest.WorkerEntry})
+			if err != nil {
+				hcu.Status.Message = err.Error()
+				break
+			}
+			r.admitWorkers(hcu, target)
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+			hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingNodePools
+			hcu.Status.Message = "Adopting verified target control plane and current worker work."
 			break
 		}
 
@@ -518,7 +562,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
 				return ctrl.Result{}, fmt.Errorf("worker prerequisite before locks: %w", err)
 			}
-			if err := r.lockClusterNodePools(ctx, hcu); err != nil {
+			if _, err := r.guestGate(ctx, hcu, uHC, baseline, guest.Policy{Purpose: guest.SourceBaseline, NextRelease: guestRelease(next)}); err != nil {
+				hcu.Status.Message = err.Error()
+				break
+			}
+			if err := r.lockClusterNodePools(ctx, hcu, uHC); err != nil {
 				return ctrl.Result{}, fmt.Errorf("lock NodePools during preflight: %w", err)
 			}
 		}
@@ -542,7 +590,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	case upgradev1alpha1.PhasePendingSchedule:
 		if hcu.Spec.ControlPlane.StartAt != nil {
-			now := time.Now()
+			now := r.now()
 			start := hcu.Spec.ControlPlane.StartAt.Time
 			if now.Before(start) {
 				requeueDur := start.Sub(now)
@@ -552,7 +600,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 				r.exposePhaseMetrics(ctx, hcu, uHC)
 				r.updateConditions(hcu)
 				if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-					if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+					if statusErr := r.persistUpgradeStatus(ctx, hcu); statusErr != nil {
 						return ctrl.Result{}, statusErr
 					}
 				}
@@ -602,10 +650,10 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Apply the version change on the HostedCluster spec!
-		if start := hcu.Spec.ControlPlane.StartAt; start != nil && time.Now().Before(start.Time) {
+		if start := hcu.Spec.ControlPlane.StartAt; start != nil && r.now().Before(start.Time) {
 			hcu.Status.Phase = upgradev1alpha1.PhasePendingSchedule
 			hcu.Status.Message = "Control Plane schedule changed; waiting before initiating a new release."
-			stateRequeueAfter = min(time.Until(start.Time), 5*time.Minute)
+			stateRequeueAfter = min(start.Time.Sub(r.now()), 5*time.Minute)
 			break
 		}
 		if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
@@ -627,11 +675,20 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
 			return ctrl.Result{}, fmt.Errorf("worker prerequisite before CP change: %w", err)
 		}
-		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
+		cpPolicy := guest.Policy{Purpose: guest.BeforeControlPlaneRequest, NextRelease: guestRelease(nextReleaseImage)}
+		if _, err := r.guestGate(ctx, hcu, uHC, baseline, cpPolicy); err != nil {
+			hcu.Status.Message = err.Error()
+			break
+		}
+		if err := r.lockClusterNodePools(ctx, hcu, uHC); err != nil {
 			return ctrl.Result{}, fmt.Errorf("lock NodePools during CP upgrade: %w", err)
 		}
 		if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
 			return ctrl.Result{}, fmt.Errorf("worker prerequisite immediately before CP change: %w", err)
+		}
+		if _, err := r.guestGate(ctx, hcu, uHC, baseline, cpPolicy); err != nil {
+			hcu.Status.Message = err.Error()
+			break
 		}
 		reqLogger.Info("Applying version change on HostedCluster spec", "step", stepLabel, "image", nextReleaseImage)
 		err = unstructured.SetNestedField(uHC.Object, nextReleaseImage, "spec", "release", "image")
@@ -648,7 +705,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		if previousImage != nextReleaseImage && (hcu.Status.ControlPlaneStatus.StartTime == nil || hcu.Status.ControlPlaneStatus.TargetReleaseImage != nextReleaseImage) {
-			now := metav1.Now()
+			now := metav1.NewTime(r.now())
 			hcu.Status.ControlPlaneStatus.StartTime = &now
 		} else if hcu.Status.ControlPlaneStatus.TargetReleaseImage != nextReleaseImage {
 			// An externally started rollout has no known actuation timestamp.
@@ -686,6 +743,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Re-verify cluster health
+		r.observeGuest(ctx, hcu, uHC)
 		isInstalling, healthErr := r.checkClusterInstallingAndHealth(uHC)
 		if healthErr != nil {
 			markUpgradeBlocked(hcu)
@@ -713,6 +771,16 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Control plane rollout to expectedVer is 100% verified!
+		purpose := guest.WorkerEntry
+		if expectedVer != targetVer {
+			purpose = guest.IntermediateVerification
+		}
+		target, guestErr := r.guestGate(ctx, hcu, uHC, expectedRelease, guest.Policy{Purpose: purpose})
+		if guestErr != nil {
+			hcu.Status.Message = guestErr.Error()
+			stateRequeueAfter = 10 * time.Second
+			break
+		}
 		hcu.Status.ControlPlaneStatus.StartTime = nil
 		if expectedVer != targetVer {
 			// Intermediate hop verified. Advance to target release image!
@@ -720,6 +788,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			hcu.Status.Message = fmt.Sprintf("Intermediate CP upgrade to %s verified. Proceeding with next upgrade jump.", expectedVer)
 		} else {
 			// Target control plane rollout completely verified!
+			r.admitWorkers(hcu, target)
 			hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingNodePools
 			hcu.Status.Message = "Hosted Control Plane upgrade successfully verified. Initiating sequential NodePool rollouts."
 		}
@@ -742,7 +811,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	case upgradev1alpha1.PhaseCompleted:
 		hcu.Status.Message = "All upgrade steps successfully verified and completed."
 		if hcu.Status.CompletionTime == nil {
-			now := metav1.Now()
+			now := metav1.NewTime(r.now())
 			hcu.Status.CompletionTime = &now
 		}
 
@@ -761,7 +830,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	// Update status if any field changed
 	if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-		err = r.Status().Update(ctx, hcu)
+		err = r.persistUpgradeStatus(ctx, hcu)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -777,7 +846,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 // updateConditions populates standard Kubernetes / GitOps conditions (Ready, Progressing, Failing)
 func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.HostedClusterUpgrade) {
 	hcu.Status.ObservedGeneration = hcu.Generation
-	now := metav1.Now()
+	now := metav1.NewTime(r.now())
 	// Ready Condition
 	readyCond := metav1.Condition{
 		Type:               "Ready",
@@ -888,7 +957,7 @@ func restoreNodePoolLock(np *unstructured.Unstructured, hcu *upgradev1alpha1.Hos
 }
 
 // lockClusterNodePools pauses all NodePools belonging to the cluster during control plane transitions.
-func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade) error {
+func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured) error {
 	uNPList, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name)
 	if err != nil {
 		return err
@@ -911,10 +980,10 @@ func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Contex
 			if pause != nil && strings.EqualFold(strings.TrimSpace(*pause), "true") {
 				continue
 			}
-			if _, _, err := checkPausedState(pause); err != nil {
+			if _, _, err := checkPausedState(pause, r.now()); err != nil {
 				return err
 			}
-			if err := r.acquireWorkerLock(ctx, hcu, &item, pause); err != nil {
+			if err := r.acquireWorkerLock(ctx, hcu, hc, &item, pause); err != nil {
 				return err
 			}
 		}
@@ -924,6 +993,7 @@ func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Contex
 
 // clearUpgradeGauges leaves historical failure counters intact.
 func clearUpgradeGauges(namespace, name string) {
+	clearGuestMetrics(namespace, name)
 	labels := prometheus.Labels{"namespace": namespace, "name": name}
 	for _, gauge := range []*prometheus.GaugeVec{
 		metricPhase, metricDuration, metricStepDuration, metricComponentReady,
@@ -936,6 +1006,7 @@ func clearUpgradeGauges(namespace, name string) {
 
 // exposePhaseMetrics populates core SRE gauge values from the resulting status.
 func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, uHC *unstructured.Unstructured) {
+	exposeGuestMetrics(hcu, r.now())
 	exposeDrainMetrics(hcu)
 	labels := prometheus.Labels{"namespace": hcu.Namespace, "name": hcu.Name}
 	for _, gauge := range []*prometheus.GaugeVec{metricPhase, metricDuration, metricStepDuration} {
@@ -1042,7 +1113,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 	if phaseVal == 6.0 || phaseVal == 0.0 { // Completed or Idle
 		metricDuration.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, intermediateVer).Set(0)
 	} else if hcu.Status.StartTime != nil {
-		duration := time.Since(hcu.Status.StartTime.Time).Seconds()
+		duration := r.now().Sub(hcu.Status.StartTime.Time).Seconds()
 		metricDuration.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, intermediateVer).Set(duration)
 	}
 	if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
@@ -1050,11 +1121,11 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 	}
 	cp := hcu.Status.ControlPlaneStatus
 	if start := cp.StartTime; start != nil && (cp.TargetReleaseImage == hcu.Spec.TargetReleaseImage || cp.TargetReleaseImage == hcu.Spec.IntermediateReleaseImage) {
-		metricStepDuration.WithLabelValues(hcu.Namespace, hcu.Name, "ControlPlane", currentVer, targetVer).Set(time.Since(start.Time).Seconds())
+		metricStepDuration.WithLabelValues(hcu.Namespace, hcu.Name, "ControlPlane", currentVer, targetVer).Set(r.now().Sub(start.Time).Seconds())
 	}
 	for _, np := range hcu.Status.NodePoolStatuses {
 		if np.StartTime != nil && np.Phase != "Completed" && np.TargetReleaseImage == hcu.Spec.TargetReleaseImage {
-			metricStepDuration.WithLabelValues(hcu.Namespace, hcu.Name, "NodePool-"+np.Name, currentVer, targetVer).Set(time.Since(np.StartTime.Time).Seconds())
+			metricStepDuration.WithLabelValues(hcu.Namespace, hcu.Name, "NodePool-"+np.Name, currentVer, targetVer).Set(r.now().Sub(np.StartTime.Time).Seconds())
 		}
 	}
 }
@@ -1086,6 +1157,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			hcu.Status.Message = err.Error()
 			return true, 10 * time.Second, nil
 		}
+		if _, err := r.guestGate(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage, guest.Policy{Purpose: guest.FinalUpgradeVerification}); err != nil {
+			hcu.Status.Message = err.Error()
+			return true, 10 * time.Second, nil
+		}
 		hcu.Status.NodePoolStatuses = nil
 		hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{}
 		// No node pools associated with this cluster. Transition directly to Completed!
@@ -1101,6 +1176,13 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 	targetReleaseImage := hcu.Spec.TargetReleaseImage
 	targetVer, _ := upgradev1alpha1.ExtractVersion(targetReleaseImage)
+	// A missing historical admission is recoverable from CURRENT worker-entry
+	// evidence. Even a failed gate must not skip accounting for active rollouts.
+	if a := hcu.Status.WorkerAdmission; a == nil || a.HostedClusterUpgradeUID != string(hcu.UID) || a.ObservedGeneration != hcu.Generation || a.PlanRevision != accessHash(hcu.Spec) || a.ReleaseRevision != accessHash(guestRelease(targetReleaseImage)) {
+		if target, err := r.guestGate(ctx, hcu, uHC, targetReleaseImage, guest.Policy{Purpose: guest.WorkerEntry}); err == nil {
+			r.admitWorkers(hcu, target)
+		}
+	}
 
 	assessments := make(map[string]workerAssessment, len(clusterNodePools))
 	for _, np := range clusterNodePools {
@@ -1177,7 +1259,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 		pUntil, _, _ := unstructured.NestedString(np.Object, "spec", "pausedUntil")
 		userPause, ownedLock, pauseErr := nodePoolPause(&np, hcu)
-		paused, pauseDelay, parseErr := checkPausedState(userPause)
+		paused, pauseDelay, parseErr := checkPausedState(userPause, r.now())
 		if pauseErr == nil {
 			pauseErr = parseErr
 		}
@@ -1232,7 +1314,12 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			}
 			if cpPrerequisiteErr == nil && !np.ownedLock && !strings.EqualFold(strings.TrimSpace(np.pausedUntil), "true") {
 				pause, _, _ := nodePoolPause(&np.object, hcu)
-				if err := r.acquireWorkerLock(ctx, hcu, &np.object, pause); err != nil {
+				if err := r.acquireWorkerLock(ctx, hcu, uHC, &np.object, pause); err != nil {
+					var failure *guest.Failure
+					if errors.As(err, &failure) {
+						np.pauseErr = err
+						continue
+					}
 					return false, 0, err
 				}
 				np.ownedLock, np.pausedUntil = true, "true"
@@ -1364,6 +1451,23 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				blockers = append(blockers, "Previous worker target still outstanding; waiting for authoritative completion before changing plans")
 				groupCompleted = false
 			} else if isUpgraded {
+				if np.ownedLock {
+					if preflightErr != nil {
+						startTime = nil
+						phase = "Completed"
+						blockers = append(blockers, fmt.Sprintf("Lock release waiting for management prerequisite: %v", preflightErr))
+						groupCompleted = false
+						goto recordPoolStatus
+					}
+					if _, err := r.guestGate(ctx, hcu, uHC, targetReleaseImage, guest.Policy{Purpose: guest.WorkerGuard}); err != nil {
+						// Completion proof survives guest failure; only lock release waits.
+						startTime = nil
+						phase = "Completed"
+						blockers = append(blockers, err.Error())
+						groupCompleted = false
+						goto recordPoolStatus
+					}
+				}
 				if changed, err := restoreNodePoolLock(&np.object, hcu); err != nil {
 					return false, 0, err
 				} else if changed {
@@ -1396,7 +1500,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				groupCompleted = false
 			} else {
 				// Evaluate StartAt schedule
-				now := time.Now()
+				now := r.now()
 				if np.startAt != nil && now.Before(*np.startAt) {
 					phase = "Scheduled"
 					groupCompleted = false
@@ -1416,6 +1520,13 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 						reqLogger.Info("Diagnostic compare values", "name", np.name, "npSpecRelease", npSpecRelease, "targetRelease", targetReleaseImage)
 
 						if npSpecRelease != targetReleaseImage || np.ownedLock {
+							target, err := r.guestGate(ctx, hcu, uHC, targetReleaseImage, guest.Policy{Purpose: guest.WorkerGuard})
+							if err != nil {
+								phase = "Blocked"
+								blockers = append(blockers, err.Error())
+								goto recordPoolStatus
+							}
+							r.admitWorkers(hcu, target)
 							actuated := npSpecRelease != targetReleaseImage || np.pausedUntil == "true"
 							reqLogger.Info("Triggering upgrade rollout on NodePool", "name", np.name, "targetImage", targetReleaseImage)
 							_ = unstructured.SetNestedField(np.object.Object, targetReleaseImage, "spec", "release", "image")
@@ -1433,7 +1544,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 									reserved[np.name] = true
 								}
 								if startTime == nil {
-									now := metav1.Now()
+									now := metav1.NewTime(r.now())
 									startTime = &now
 								}
 							}
@@ -1450,6 +1561,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				}
 			}
 
+		recordPoolStatus:
 			var schedStart *metav1.Time
 			if np.startAt != nil {
 				t := metav1.NewTime(*np.startAt)
@@ -1484,6 +1596,14 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	r.refreshDrainDiagnostics(ctx, hcu)
 
 	if allCompleted {
+		if err := r.verifyControlPlane(ctx, hcu, uHC, targetReleaseImage); err != nil {
+			hcu.Status.Message = err.Error()
+			return true, 10 * time.Second, nil
+		}
+		if _, err := r.guestGate(ctx, hcu, uHC, targetReleaseImage, guest.Policy{Purpose: guest.FinalUpgradeVerification}); err != nil {
+			hcu.Status.Message = "NodePools complete; " + err.Error()
+			return true, 10 * time.Second, nil
+		}
 		// All groups successfully verified and upgraded! Transition state machine to Completed.
 		hcu.Status.Phase = upgradev1alpha1.PhaseCompleted
 		hcu.Status.Message = "All worker NodePools successfully upgraded and verified on target version."
@@ -1511,7 +1631,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 }
 
 // checkPausedState evaluates if the coordinator is paused (indefinitely or timed).
-func checkPausedState(pausedUntil *string) (bool, time.Duration, error) {
+func checkPausedState(pausedUntil *string, now time.Time) (bool, time.Duration, error) {
 	if pausedUntil == nil || *pausedUntil == "" {
 		return false, 0, nil
 	}
@@ -1530,7 +1650,6 @@ func checkPausedState(pausedUntil *string) (bool, time.Duration, error) {
 		return false, 0, fmt.Errorf("unable to parse RFC3339 timestamp '%s': %v", pStr, err)
 	}
 
-	now := time.Now()
 	if t.After(now) {
 		return true, t.Sub(now), nil
 	}
@@ -1540,6 +1659,12 @@ func checkPausedState(pausedUntil *string) (bool, time.Duration, error) {
 
 // SetupWithManager sets up the controller with the Manager and registers our event-driven watches.
 func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return r.setupWithManager(mgr, "hostedclusterupgrade")
+}
+
+// A separate registration name lets component tests run the identical watch
+// wiring alongside the suite's manager without disabling name validation.
+func (r *HostedClusterUpgradeReconciler) setupWithManager(mgr ctrl.Manager, name string) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &upgradev1alpha1.HostedClusterUpgrade{}, controlPlaneNamespaceField, func(obj client.Object) []string {
 		return []string{WorkerControlPlaneNamespace(obj.GetNamespace(), obj.GetName())}
 	}); err != nil {
@@ -1563,8 +1688,8 @@ func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	uMS := &unstructured.Unstructured{}
 	uMS.SetGroupVersionKind(gvkMachineSet)
 
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&upgradev1alpha1.HostedClusterUpgrade{}).
+	return ctrl.NewControllerManagedBy(mgr).Named(name).
+		For(&upgradev1alpha1.HostedClusterUpgrade{}, builder.WithPredicates(upgradeEventPredicate)).
 		Watches(uHCP, handler.EnqueueRequestsFromMapFunc(r.mapCPCToHostedClusterUpgrade)).
 		Watches(uMD, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
 		Watches(uMS, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
@@ -1581,6 +1706,9 @@ func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) erro
 			uNP,
 			handler.EnqueueRequestsFromMapFunc(r.mapNodePoolToHostedClusterUpgrade),
 		).
+		// A slow guest must not occupy the only fleet worker. The workqueue
+		// still serializes reconciliations for each individual HCU key.
+		WithOptions(controlleroptions.Options{MaxConcurrentReconciles: 2}).
 		Complete(r)
 }
 

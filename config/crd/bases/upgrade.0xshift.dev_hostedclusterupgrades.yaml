@@ -332,6 +332,143 @@ spec:
                 - available
                 - reason
                 type: object
+              guestAccess:
+                description: GuestAccess is owned exclusively by the guest-access
+                  controller.
+                properties:
+                  clusterID:
+                    maxLength: 64
+                    type: string
+                  clusterVersionUID:
+                    maxLength: 64
+                    type: string
+                  credentialAvailable:
+                    type: boolean
+                  endpointRevision:
+                    maxLength: 64
+                    type: string
+                  expiresAt:
+                    format: date-time
+                    type: string
+                  hostedClusterUID:
+                    maxLength: 64
+                    type: string
+                  maintenanceReady:
+                    type: boolean
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  observerUsability:
+                    description: ObserverUsability remains Unknown until a scoped
+                      observation is performed.
+                    enum:
+                    - Unknown
+                    - Ready
+                    - Unavailable
+                    - AccessDenied
+                    type: string
+                  profileRevision:
+                    maxLength: 64
+                    type: string
+                  reason:
+                    maxLength: 64
+                    type: string
+                  secretName:
+                    maxLength: 253
+                    type: string
+                required:
+                - credentialAvailable
+                - maintenanceReady
+                - observerUsability
+                - reason
+                type: object
+              guestAssessment:
+                description: |-
+                  GuestAssessment is owned by the upgrade controller. Historical success is
+                  diagnostic only; every new action requires a fresh scoped observation.
+                properties:
+                  blockerCount:
+                    format: int32
+                    type: integer
+                  blockers:
+                    items:
+                      properties:
+                        operator:
+                          maxLength: 253
+                          type: string
+                        reason:
+                          maxLength: 64
+                          type: string
+                      required:
+                      - reason
+                      type: object
+                    maxItems: 32
+                    type: array
+                  expectedVersion:
+                    maxLength: 128
+                    type: string
+                  hostedClusterUID:
+                    maxLength: 64
+                    type: string
+                  lastAttemptTime:
+                    format: date-time
+                    type: string
+                  lastSuccessfulObservation:
+                    format: date-time
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  operators:
+                    items:
+                      properties:
+                        name:
+                          maxLength: 253
+                          type: string
+                        version:
+                          maxLength: 128
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 256
+                    type: array
+                  planRevision:
+                    maxLength: 64
+                    type: string
+                  purpose:
+                    maxLength: 64
+                    type: string
+                  reason:
+                    maxLength: 64
+                    type: string
+                  secretRevision:
+                    maxLength: 128
+                    type: string
+                  secretUID:
+                    maxLength: 64
+                    type: string
+                  state:
+                    enum:
+                    - Ready
+                    - Converging
+                    - Unhealthy
+                    - Unavailable
+                    - AccessDenied
+                    - IdentityMismatch
+                    - UnsupportedEvidence
+                    type: string
+                  truncated:
+                    type: boolean
+                required:
+                - blockerCount
+                - lastAttemptTime
+                - observedGeneration
+                - purpose
+                - reason
+                - state
+                - truncated
+                type: object
               initialVersion:
                 description: |-
                   InitialVersion is the observed source version for this upgrade run.
@@ -416,8 +553,9 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase is the current high-level state of the upgrade
-                  state machine.
+                description: |-
+                  Phase is the current high-level state of the upgrade state machine.
+                  It is absent until the upgrade writer initializes; access may report first.
                 type: string
               phaseBeforeBlock:
                 description: PhaseBeforeBlock is the failed step to retry without
@@ -431,8 +569,43 @@ spec:
                 description: StartTime is the time when the upgrade actually commenced.
                 format: date-time
                 type: string
-            required:
-            - phase
+              workerAdmission:
+                description: WorkerAdmission records compatible stage adoption, never
+                  authorization.
+                properties:
+                  admittedAt:
+                    format: date-time
+                    type: string
+                  clusterID:
+                    maxLength: 64
+                    type: string
+                  hostedClusterUID:
+                    maxLength: 64
+                    type: string
+                  hostedClusterUpgradeUID:
+                    maxLength: 64
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  planRevision:
+                    maxLength: 64
+                    type: string
+                  releaseRevision:
+                    description: |-
+                      ReleaseRevision hashes the expected version and immutable payload identity.
+                      The desired image remains in spec; it is not copied into bounded status.
+                    maxLength: 64
+                    type: string
+                required:
+                - admittedAt
+                - clusterID
+                - hostedClusterUID
+                - hostedClusterUpgradeUID
+                - observedGeneration
+                - planRevision
+                - releaseRevision
+                type: object
             type: object
         type: object
     served: true

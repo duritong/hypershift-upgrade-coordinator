@@ -64,7 +64,7 @@ func (r *HostedClusterUpgradeReconciler) refreshDrainDiagnostics(ctx context.Con
 	if !active {
 		return
 	}
-	fallback := time.Now().Add(-drainLogLookback)
+	fallback := r.now().Add(-drainLogLookback)
 	if since.IsZero() || (unknown && fallback.Before(since)) {
 		since = fallback
 	}

@@ -58,6 +58,9 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var hostedClusterNamespace string
+	var operatorNamespace, guestEndpointMode string
+	flag.StringVar(&operatorNamespace, "operator-namespace", os.Getenv("OPERATOR_NAMESPACE"), "Deployment namespace for observer credential Secrets (required).")
+	flag.StringVar(&guestEndpointMode, "guest-endpoint-mode", controller.GuestEndpointInternal, "Guest API endpoint: internal or published; no automatic fallback.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&hostedClusterNamespace, "hosted-cluster-namespace", "clusters", "The namespace of HostedCluster resources managed by this operator.")
@@ -71,10 +74,21 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if operatorNamespace == "" || (guestEndpointMode != controller.GuestEndpointInternal && guestEndpointMode != controller.GuestEndpointPublished) {
+		setupLog.Error(nil, "operator-namespace is required and guest-endpoint-mode must be internal or published")
+		os.Exit(1)
+	}
+	secretCache, err := controller.GuestAccessCacheOptions(operatorNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to configure delivery Secret cache")
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Client: client.Options{Cache: &client.CacheOptions{Unstructured: true}},
+		// Only delivery Secrets are cached. Admin/pull Secrets remain APIReader get-only.
+		Cache: secretCache,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
@@ -95,6 +109,13 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes clientset")
 		os.Exit(1)
 	}
+	if err = (&controller.GuestAccessReconciler{
+		Client:              mgr.GetClient(),
+		GuestAccessProvider: controller.GuestAccessProvider{APIReader: mgr.GetAPIReader(), OperatorNamespace: operatorNamespace, HostedClusterNamespace: hostedClusterNamespace, EndpointMode: guestEndpointMode},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "guest-access")
+		os.Exit(1)
+	}
 
 	if err = (&controller.HostedClusterUpgradeReconciler{
 		Client:                 mgr.GetClient(),
@@ -103,6 +124,7 @@ func main() {
 		Scheme:                 mgr.GetScheme(),
 		HostedClusterNamespace: hostedClusterNamespace,
 		LogScraper:             &controller.KubeLogScraper{Client: clientset},
+		GuestAccess:            &controller.GuestAccessProvider{APIReader: mgr.GetAPIReader(), OperatorNamespace: operatorNamespace, HostedClusterNamespace: hostedClusterNamespace, EndpointMode: guestEndpointMode},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HostedClusterUpgrade")
 		os.Exit(1)

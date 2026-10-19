@@ -108,6 +108,7 @@ var _ = BeforeSuite(func() {
 		Scheme:                 mgr.GetScheme(),
 		HostedClusterNamespace: "default",
 		LogScraper:             testLogScraper,
+		GuestAccess:            legacyGuest(mgr.GetAPIReader(), nil, nil),
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

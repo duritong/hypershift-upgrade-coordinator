@@ -130,11 +130,12 @@ func TestDrainLogTruthfulness(t *testing.T) {
 }
 
 func TestDrainDiagnosticsRefresh(t *testing.T) {
-	start := metav1.NewTime(time.Now().Add(-time.Hour))
+	clock := &flowClock{at: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	start := metav1.NewTime(clock.Now().Add(-time.Hour))
 	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "a", Phase: "Upgrading", StartTime: &start}, {Name: "b", Phase: "Upgrading", StartTime: &start}}
-	s := &diagnosticScraper{logs: time.Now().UTC().Format(time.RFC3339Nano) + ` {"msg":"failed to drain node","Node":{"name":"unknown-pool-node"}}`}
-	r := &HostedClusterUpgradeReconciler{LogScraper: s}
+	s := &diagnosticScraper{logs: clock.Now().Format(time.RFC3339Nano) + ` {"msg":"failed to drain node","Node":{"name":"unknown-pool-node"}}`}
+	r := &HostedClusterUpgradeReconciler{LogScraper: s, Clock: clock}
 	r.refreshDrainDiagnostics(context.Background(), hcu)
 	if s.calls != 1 || !s.since.Equal(start.Time) || !hcu.Status.DrainDiagnostics.Available || len(hcu.Status.DrainDiagnostics.Messages) != 1 {
 		t.Fatalf("incorrect collection: %+v %+v", s, hcu.Status.DrainDiagnostics)
@@ -163,8 +164,13 @@ func TestDrainDiagnosticsRefresh(t *testing.T) {
 	r.LogScraper = s
 	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "external", Phase: "Blocked"}}
 	r.refreshDrainDiagnostics(context.Background(), hcu)
-	if time.Since(s.since) < drainLogLookback || time.Since(s.since) > drainLogLookback+time.Second {
+	if !s.since.Equal(clock.Now().Add(-drainLogLookback)) {
 		t.Fatal("unknown start did not use recent fallback")
+	}
+	clock.Step(time.Hour)
+	r.refreshDrainDiagnostics(context.Background(), hcu)
+	if !s.since.Equal(clock.Now().Add(-drainLogLookback)) {
+		t.Fatal("diagnostic lookback did not advance with policy time")
 	}
 	hcu.Status.NodePoolStatuses[0].Phase = "Completed"
 	r.refreshDrainDiagnostics(context.Background(), hcu)
@@ -181,11 +187,11 @@ func TestDiagnosticFailureDoesNotPreventWorkerActions(t *testing.T) {
 			base := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
 			addReadyCP(base, regressionHC("4.21.0"))
 			s := &diagnosticScraper{err: fmt.Errorf("unavailable")}
-			r := &HostedClusterUpgradeReconciler{Client: base, LogScraper: s, ReleaseResolver: fixtureReleaseResolver{}}
+			r := &HostedClusterUpgradeReconciler{Client: base, APIReader: workerSource(base, hcu), LogScraper: s, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(base, hcu, nil)}
 			if !configured {
 				r.LogScraper = nil
 			}
-			if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+			if err := r.lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)
 			}
 			hc := regressionHC("4.21.0")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -108,9 +109,12 @@ func (r *HostedClusterUpgradeReconciler) WorkerPrerequisite(ctx context.Context,
 	return nil
 }
 
-func (r *HostedClusterUpgradeReconciler) acquireWorkerLock(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, np *unstructured.Unstructured, pause *string) error {
+func (r *HostedClusterUpgradeReconciler) acquireWorkerLock(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured, np *unstructured.Unstructured, pause *string) error {
 	a, err := r.assessWorkerQuiescence(ctx, hcu, np)
 	if err != nil {
+		return err
+	}
+	if err := r.workerLockSourceFence(ctx, hcu, hc); err != nil {
 		return err
 	}
 	original, _ := json.Marshal(pause)
@@ -129,6 +133,35 @@ func (r *HostedClusterUpgradeReconciler) acquireWorkerLock(ctx context.Context, 
 	np.SetAnnotations(annotations)
 	_ = unstructured.SetNestedField(np.Object, "true", "spec", "pausedUntil")
 	return r.Update(ctx, np)
+}
+
+// Holds do not need a healthy guest snapshot, but they ARE mutations. Check the
+// current coordinator and HC just before each write; never trust an old pause or
+// rebind a stale decision to a replacement/current-generation source.
+func (r *HostedClusterUpgradeReconciler) workerLockSourceFence(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured) error {
+	if r.APIReader == nil {
+		return accessFailure("WorkerLockSourceUnavailable")
+	}
+	fresh := &upgradev1alpha1.HostedClusterUpgrade{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(hcu), fresh); err != nil {
+		return accessFailure("WorkerLockSourceUnavailable")
+	}
+	paused, _, err := checkPausedState(fresh.Spec.PausedUntil, r.now())
+	if err != nil || paused || !fresh.DeletionTimestamp.IsZero() || fresh.UID == "" || fresh.UID != hcu.UID || fresh.Generation != hcu.Generation || !reflect.DeepEqual(fresh.Spec, hcu.Spec) {
+		return accessFailure("WorkerLockSourceChanged")
+	}
+	current := &unstructured.Unstructured{}
+	current.SetGroupVersionKind(gvkHC)
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(hc), current); err != nil {
+		return accessFailure("WorkerLockSourceUnavailable")
+	}
+	if current.GetUID() == "" || current.GetUID() != hc.GetUID() || current.GetGeneration() < 1 || current.GetGeneration() != hc.GetGeneration() || !current.GetDeletionTimestamp().IsZero() || !reflect.DeepEqual(current.Object["spec"], hc.Object["spec"]) {
+		return accessFailure("WorkerLockSourceChanged")
+	}
+	if err := upgradev1alpha1.RejectControlPlaneReleaseOverride(current); err != nil {
+		return accessFailure("WorkerLockSourceChanged")
+	}
+	return nil
 }
 
 type workerAssessment struct {

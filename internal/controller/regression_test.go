@@ -9,11 +9,14 @@ import (
 	"time"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -39,6 +42,15 @@ func (c *regressionClient) Get(_ context.Context, key client.ObjectKey, out clie
 func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts ...client.ListOption) error {
 	options := &client.ListOptions{}
 	options.ApplyOptions(opts)
+	if list, ok := out.(*corev1.SecretList); ok {
+		list.Items = nil
+		for _, obj := range c.objects {
+			if s, ok := obj.(*corev1.Secret); ok && (options.Namespace == "" || s.Namespace == options.Namespace) && (options.LabelSelector == nil || options.LabelSelector.Matches(labels.Set(s.Labels))) {
+				list.Items = append(list.Items, *s.DeepCopy())
+			}
+		}
+		return nil
+	}
 	if list, ok := out.(*upgradev1alpha1.HostedClusterUpgradeList); ok {
 		list.Items = nil
 		for _, obj := range c.objects {
@@ -65,10 +77,24 @@ func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts .
 }
 
 func (c *regressionClient) Update(_ context.Context, obj client.Object, _ ...client.UpdateOption) error {
+	if _, secret := obj.(*corev1.Secret); secret {
+		obj.SetResourceVersion(obj.GetResourceVersion() + "-next")
+	}
 	if _, downstream := obj.(*unstructured.Unstructured); downstream {
 		c.writes++
 	}
 	return c.store(obj)
+}
+
+func (c *regressionClient) Create(_ context.Context, obj client.Object, _ ...client.CreateOption) error {
+	if obj.GetUID() == "" {
+		obj.SetUID(types.UID(obj.GetName() + "-uid"))
+	}
+	if obj.GetResourceVersion() == "" {
+		obj.SetResourceVersion("1")
+	}
+	c.objects = append(c.objects, obj.DeepCopyObject().(client.Object))
+	return nil
 }
 
 func (c *regressionClient) store(obj client.Object) error {
@@ -94,6 +120,10 @@ func (s regressionStatusWriter) Update(_ context.Context, obj client.Object, _ .
 	return s.c.store(obj)
 }
 
+func (s regressionStatusWriter) Patch(_ context.Context, obj client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+	return s.c.store(obj)
+}
+
 func regressionImage(version string) string {
 	return fmt.Sprintf("quay.io/ocp:%s-x86_64@sha256:%x", version, sha256.Sum256([]byte(version)))
 }
@@ -103,6 +133,9 @@ func regressionHC(version string) *unstructured.Unstructured {
 	u.SetGroupVersionKind(gvkHC)
 	u.SetNamespace("clusters")
 	u.SetName("example")
+	u.SetUID("hc-uid")
+	u.SetGeneration(1)
+	_ = unstructured.SetNestedField(u.Object, "a5e99fb2-0598-4b34-9081-14236b744c16", "spec", "clusterID")
 	_ = unstructured.SetNestedField(u.Object, regressionImage(version), "spec", "release", "image")
 	_ = unstructured.SetNestedSlice(u.Object, []interface{}{map[string]interface{}{
 		"state": "Completed", "version": version, "image": regressionImage(version),
@@ -110,16 +143,16 @@ func regressionHC(version string) *unstructured.Unstructured {
 	history, _, _ := unstructured.NestedSlice(u.Object, "status", "version", "history")
 	_ = unstructured.SetNestedSlice(u.Object, history, "status", "controlPlaneVersion", "history")
 	_ = unstructured.SetNestedField(u.Object, int64(1), "status", "controlPlaneVersion", "observedGeneration")
-	setHealthyHostedClusterStatus(u)
+	setHealthyHostedClusterStatus(u, time.Now())
 	return u
 }
 
-func setHealthyHostedClusterStatus(hc *unstructured.Unstructured) {
+func setHealthyHostedClusterStatus(hc *unstructured.Unstructured, now time.Time) {
 	conditions := []interface{}{}
 	for _, typ := range []string{"Available", "ClusterVersionAvailable", "ClusterVersionSucceeding", "ClusterVersionUpgradeable"} {
 		conditions = append(conditions, map[string]interface{}{
 			"type": typ, "status": "True", "reason": "AsExpected", "message": "Ready",
-			"lastTransitionTime": time.Now().Format(time.RFC3339), "observedGeneration": hc.GetGeneration(),
+			"lastTransitionTime": now.Format(time.RFC3339), "observedGeneration": hc.GetGeneration(),
 		})
 	}
 	_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
@@ -127,7 +160,7 @@ func setHealthyHostedClusterStatus(hc *unstructured.Unstructured) {
 
 func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedClusterUpgrade {
 	return &upgradev1alpha1.HostedClusterUpgrade{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "clusters", Name: "example", Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "clusters", Name: "example", UID: "upgrade-uid", Generation: 1},
 		Spec:       upgradev1alpha1.HostedClusterUpgradeSpec{TargetReleaseImage: regressionImage("4.21.0")},
 		Status:     upgradev1alpha1.HostedClusterUpgradeStatus{Phase: phase},
 	}
@@ -135,7 +168,7 @@ func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedCl
 
 func reconcileRegression(t *testing.T, c *regressionClient) *upgradev1alpha1.HostedClusterUpgrade {
 	t.Helper()
-	r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, nil, nil)}
 	key := client.ObjectKey{Namespace: "clusters", Name: "example"}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
@@ -145,6 +178,23 @@ func reconcileRegression(t *testing.T, c *regressionClient) *upgradev1alpha1.Hos
 		t.Fatal(err)
 	}
 	return hcu
+}
+
+// Direct scheduler tests still have actual management source objects. The reader
+// is explicit so a missing production APIReader can never become a test bypass.
+func workerSource(c *regressionClient, hcu *upgradev1alpha1.HostedClusterUpgrade) client.Reader {
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(hcu), &upgradev1alpha1.HostedClusterUpgrade{}); err != nil {
+		c.objects = append(c.objects, hcu)
+	}
+	hc := &unstructured.Unstructured{}
+	hc.SetGroupVersionKind(gvkHC)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(hcu), hc); err != nil {
+		hc = regressionHC("4.21.0")
+		hc.SetName(hcu.Name)
+		hc.SetNamespace(hcu.Namespace)
+		c.objects = append(c.objects, hc)
+	}
+	return c
 }
 
 func TestCompletedUpgradeNewTarget(t *testing.T) {

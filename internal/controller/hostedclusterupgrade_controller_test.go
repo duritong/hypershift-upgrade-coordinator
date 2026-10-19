@@ -38,6 +38,7 @@ func createAndSetStatusHostedCluster(ctx context.Context, name, namespace, relea
 	hc.SetGroupVersionKind(gvkHC)
 	hc.SetName(name)
 	hc.SetNamespace(namespace)
+	_ = unstructured.SetNestedField(hc.Object, "a5e99fb2-0598-4b34-9081-14236b744c16", "spec", "clusterID")
 
 	_ = unstructured.SetNestedField(hc.Object, releaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
@@ -82,7 +83,7 @@ func createAndSetStatusHostedCluster(ctx context.Context, name, namespace, relea
 	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
 	_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
 	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"desired": desired, "history": history, "observedGeneration": int64(1)}, "status", "controlPlaneVersion")
-	setHealthyHostedClusterStatus(hc)
+	setHealthyHostedClusterStatus(hc, time.Now())
 
 	Expect(k8sClient.Status().Update(ctx, hc)).To(Succeed())
 	attachReadyHCP(ctx, hc)
@@ -193,11 +194,13 @@ func attachReadyHCP(ctx context.Context, hc *unstructured.Unstructured) {
 	old := &unstructured.Unstructured{}
 	old.SetGroupVersionKind(gvkHCP)
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: hcp.GetNamespace(), Name: hcp.GetName()}, old); apierrors.IsNotFound(err) {
+		hcp.SetUID("")
 		Expect(k8sClient.Create(ctx, hcp)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, hcp) })
 	} else {
 		Expect(err).NotTo(HaveOccurred())
 		hcp.SetResourceVersion(old.GetResourceVersion())
+		hcp.SetUID(old.GetUID())
 		Expect(k8sClient.Update(ctx, hcp)).To(Succeed())
 	}
 	history, _, _ := unstructured.NestedSlice(hc.Object, "status", "version", "history")
@@ -641,18 +644,16 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			defer func() { _ = k8sClient.Delete(ctx, hcu) }()
 
 			// Verify that pool-semver phase is "Upgrading" (NOT "Completed"!) and spec release is updated to 4.22.2
-			Eventually(func() string {
+			Eventually(func(g Gomega) {
 				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
-				if err := k8sClient.Get(ctx, hcuKey, fetched); err != nil {
-					return ""
-				}
+				g.Expect(k8sClient.Get(ctx, hcuKey, fetched)).To(Succeed())
+				g.Expect(fetched.Status.NodePoolStatuses).NotTo(BeEmpty())
 				for _, status := range fetched.Status.NodePoolStatuses {
 					if status.Name == "pool-semver" {
-						return status.Phase
+						g.Expect(status.Phase).To(Equal("Upgrading"), "blockers=%v guest=%+v", status.Blockers, fetched.Status.GuestAssessment)
 					}
 				}
-				return ""
-			}, timeout, interval).Should(Equal("Upgrading"))
+			}, timeout, interval).Should(Succeed())
 
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
@@ -739,37 +740,37 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 
 		It("should evaluate checkPausedState with timestamps and boolean strings", func() {
 			// Nil / empty
-			paused, dur, err := checkPausedState(nil)
+			paused, dur, err := checkPausedState(nil, time.Now())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(paused).To(BeFalse())
 
 			empty := ""
-			paused, dur, err = checkPausedState(&empty)
+			paused, dur, err = checkPausedState(&empty, time.Now())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(paused).To(BeFalse())
 
 			// "false" / "False"
 			fStr := "false"
-			paused, dur, err = checkPausedState(&fStr)
+			paused, dur, err = checkPausedState(&fStr, time.Now())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(paused).To(BeFalse())
 
 			// Future RFC3339 timestamp
 			future := time.Now().Add(1 * time.Hour).Format(time.RFC3339)
-			paused, dur, err = checkPausedState(&future)
+			paused, dur, err = checkPausedState(&future, time.Now())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(paused).To(BeTrue())
 			Expect(dur).To(BeNumerically(">", 0))
 
 			// Past RFC3339 timestamp
 			past := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
-			paused, dur, err = checkPausedState(&past)
+			paused, dur, err = checkPausedState(&past, time.Now())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(paused).To(BeFalse())
 
 			// Invalid string
 			invalid := "not-a-date"
-			_, _, err = checkPausedState(&invalid)
+			_, _, err = checkPausedState(&invalid, time.Now())
 			Expect(err).To(HaveOccurred())
 		})
 

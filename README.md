@@ -18,6 +18,7 @@ The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifie
 *   **Pool Concurrency Limits:** Cap concurrent NodePool rollouts within the active group via `rolloutPolicy.maxParallelNodePools` (default one). This is a pool count, not a node disruption or capacity budget; per-pool rollout settings, replica counts, workload placement, and PDBs still matter.
 *   **Granular Pause & Resume Support:** Features both coordinator-level pausing (via `pausedUntil`, which supports indefinite pausing with `"true"` or scheduled pausing with an RFC3339 timestamp) and object-level control using HyperShift's native `spec.pausedUntil` fields.
 *   **Fleet-Wide Management & Dynamic Namespace Discovery:** Operates as a cluster-scoped fleet controller on the management cluster, automatically managing upgrades across dynamically provisioned clusters and their control planes, with optional namespace filtering via `--hosted-cluster-namespace`.
+*   **Mandatory Scoped Guest Verification (Implemented, Unreleased):** Fresh direct ClusterVersion/all-current-ClusterOperator evidence gates new actions and final completion, alongside management proofs. Scoped tokens are bootstrapped/rotated by an independent in-process controller. No check skips, exclusions or force/bypass flags are available; firing-alert querying remains deferred. Deploy the new CRD, RBAC and image together and configure [guest access/network prerequisites](docs/user-guide.md#mandatory-guest-access-unreleased).
 *   **GitOps & ArgoCD Friendly:** Merge upgrades upfront and stagger control-plane and worker-group starts. ArgoCD needs both `ignoreDifferences` and `RespectIgnoreDifferences=true` to preserve coordinator-owned live fields during later syncs; creation still applies bootstrap values from Git. See the [GitOps guide](docs/gitops.md).
 
 ---
@@ -68,6 +69,11 @@ workflow. Coordinator pause is observe-only, not quiescence: HyperShift rollouts
 and guest operand updates already started can continue. See the
 [ownership contract](docs/gitops.md#4-ownership-contract) for these operational
 requirements and limitations.
+
+Pause permits narrowly scoped renewal of an already-owned observer identity and
+update of its existing delivery Secret, but no bootstrap, RBAC repair or missing
+resource recreation. Credential maintenance continues after Completed; that
+historical outcome is not a continuous guest-health promise.
 
 ---
 

@@ -19,8 +19,8 @@ func TestDeletionRestoresOwnedWorkerLocks(t *testing.T) {
 	user := regressionNP("user", "")
 	_ = unstructured.SetNestedField(user.Object, "true", "spec", "pausedUntil")
 	c := &regressionClient{objects: []client.Object{hcu, owned, user}}
-	r := &HostedClusterUpgradeReconciler{Client: c}
-	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: workerSource(c, hcu)}
+	if err := r.lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
@@ -53,8 +53,8 @@ func TestDeletionRetainsFinalizerOnRestoreFailure(t *testing.T) {
 	hcu.Finalizers = []string{"upgrade.huc.0xshift.dev/worker-locks"}
 	np := regressionNP("workers", "")
 	base := &regressionClient{objects: []client.Object{hcu, np}}
-	r := &HostedClusterUpgradeReconciler{Client: base}
-	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+	r := &HostedClusterUpgradeReconciler{Client: base, APIReader: workerSource(base, hcu)}
+	if err := r.lockClusterNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
 	now := metav1.Now()

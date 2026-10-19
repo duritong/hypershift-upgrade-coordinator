@@ -275,6 +275,56 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 9, "title": "Observer Credential Availability", "type": "table",
+      "description": "Credential presence and expiry only, not observer authentication. Renewal continues after completion.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_credential_available and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 10, "title": "Guest Access Maintenance Ready", "type": "table",
+      "description": "Latest current-generation maintenance result. A failed renewal can coexist with a still-valid credential.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_access_maintenance_ready and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 11, "title": "Latest Guest Purpose Verdict", "type": "table",
+      "description": "Purpose-specific evidence, not global health or permission for a future action. Stale/changed plans are explicit; no active verdict for Paused/Completed.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 52},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_assessment{purpose=~\"$guest_purpose\"} and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 12, "title": "Scoped Guest Read Age", "type": "table",
+      "description": "Seconds since last successful collection, including unhealthy results. A zero timestamp means never observed, not healthy.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 60},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "(time() - hypershift_upgrade_guest_last_successful_observation_timestamp_seconds) and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 13, "title": "Observer Credential Remaining Lifetime", "type": "table",
+      "description": "Seconds until reported token expiration; absent if unknown. Negative means expired.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 60},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "(hypershift_upgrade_guest_credential_expiration_timestamp_seconds - time()) and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 14, "title": "Guest Assessment Blocker Count", "type": "table",
+      "description": "All blockers, including details omitted by the 32-entry limit. Zero alone is not a passing assessment.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 68},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_blocker_count and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 15, "title": "Guest Operator Blockers", "type": "table",
+      "description": "At most 32 reported blocker details. Removed operators disappear after the next complete snapshot; absence is not proof of health.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 68},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_operator_blocker{purpose=~\"$guest_purpose\"} and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "id": 16, "title": "Assessed Guest Operator Count", "type": "table",
+      "description": "Latest fresh assessment summaries, at most 256. No expected or retained inventory; a failed read may report zero summaries.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 76},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "hypershift_upgrade_guest_operator_count and on(namespace, name) hypershift_upgrade_phase{current_version=~\"$current_version\", target_version=~\"$target_version\"}", "format": "table", "instant": true, "range": false, "refId": "A"}]
     }
   ],
   "schemaVersion": 38,
@@ -282,6 +332,13 @@
   "tags": ["hypershift", "operator", "sre"],
   "templating": {
     "list": [
+      {
+        "name": "guest_purpose", "label": "Guest Purpose", "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "definition": "label_values(hypershift_upgrade_guest_assessment, purpose)",
+        "query": {"query": "label_values(hypershift_upgrade_guest_assessment, purpose)", "refId": "StandardVariableQuery"},
+        "includeAll": true, "allValue": ".*", "multi": true, "refresh": 1, "current": {}, "sort": 1
+      },
       {
         "name": "datasource",
         "label": "Prometheus",
@@ -341,5 +398,5 @@
   },
   "title": "HyperShift Upgrade Coordinator SRE Dashboard",
   "uid": "huc-sre-dashboard",
-  "version": 2
+  "version": 3
 }

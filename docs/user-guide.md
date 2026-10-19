@@ -48,6 +48,82 @@ Verify that the coordinator manager pod is running successfully:
 oc get pods -n hypershift-upgrade-coordinator
 ```
 
+### Mandatory Guest Access (Unreleased)
+
+Deploy the updated HCU CRD, management RBAC (including the namespace-local
+delivery Secret Role/RoleBinding), and operator image together. Existing HCUs are
+also enrolled: guest verification is mandatory in the normal workflow, not an
+opt-in feature. **Check skipping, operator exclusions, bypass and force flags are
+not available.** Automated tests cover simulated complete upgrade flows, real API
+authorization and token issuance, and TLS behavior. These do not replace deployed
+HyperShift validation of public/private connectivity, credential rotation, actual
+node rollouts, fleet capacity or live monitoring before production use.
+
+`--operator-namespace` is required, or supplied through `OPERATOR_NAMESPACE`.
+The packaged Deployment sets that environment variable from its Pod namespace
+using the Downward API. This is the coordinator's deployment namespace, not the
+HostedCluster namespace. `--hosted-cluster-namespace` defaults to `clusters`;
+empty selects all HC namespaces and is a reconciliation filter, not an RBAC limit.
+
+The independently queued `guest-access` controller requires the current HC's
+`status.kubeconfig` published administrative Secret reference and usable
+`spec.clusterID`. Bootstrap first reads guest `ClusterVersion/version`, verifies
+its cluster ID against the HC, and discovers its UID. Guest health need not be
+good to bootstrap access. Only supported embedded certificates/tokens and a
+trusted embedded CA are accepted; plugins, local files, proxies, impersonation
+and insecure TLS are rejected. No other admin credential source is substituted.
+
+Endpoint selection is explicit:
+
+- `--guest-endpoint-mode=internal` is the default. It uses
+  `kube-apiserver.<derived-control-plane-namespace>.svc`, the actual TCP Service
+  port (not targetPort or an assumed 6443), verified HCP association, the matching
+  private serving-certificate SAN/SNI, and the trusted guest CA.
+- `--guest-endpoint-mode=published` retains the published kubeconfig endpoint and
+  verified TLS settings. There is no automatic fallback between modes.
+
+Allow coordinator egress to management APIs and DNS, and to every selected guest
+API endpoint. For internal mode, allow ingress to the HCP kube-apiserver Service
+from the coordinator namespace on its **Service port**, including the actual
+backing listener in pod/network-policy rules. Cross-namespace DNS, private named
+serving certificates and CA trust must work from the coordinator Pod. Published
+mode requires the corresponding external/private published address to be
+reachable. Packaged policies are not proof that fleet-specific guest connectivity
+is permitted. A TLS, ownership, port or reachability failure withholds new work;
+never work around it by disabling verification.
+
+### Credential Ownership And Lifecycle
+
+The fixed guest namespace, ServiceAccount, ClusterRole and binding are named
+`huc-guest-observer`. They are tagged with HC UID, cluster ID and profile revision;
+unowned/conflicting resources are refused. The guest role grants **only** `get`
+on `config.openshift.io/clusterversions` named `version` and `list` on all
+`clusteroperators`. It grants no guest Secret/workload access, mutations or watches.
+Owned profile drift is repaired only while active.
+
+TokenRequest requests one hour with API-default audiences and honors the actual
+returned expiration. No legacy ServiceAccount token Secret is created. Only the
+observer kubeconfig is delivered in `guest-observer-<HC UID>` in the operator
+namespace, with source/identity/profile/endpoint/expiry metadata and no
+cross-namespace owner reference. Admin and pull Secrets are uncached get-only;
+only labeled local delivery Secrets are cached.
+
+The local management Role grants **actual whole-namespace Secret lifecycle
+authority**, not an RBAC-enforced prefix or label restriction. Ownership checks
+are application safeguards. Existing fleet-wide admin Secret get access remains
+powerful; scoped tokens are auditability and privilege-use discipline, not a
+sandbox against a compromised coordinator process.
+
+Renewal occurs before expiry with bounded jitter/retries. A failed renewal retains
+an existing valid credential; at expiry observations become unavailable. Observer
+401/403 never causes ordinary reads to fall back to admin; access maintenance may
+verify/repair/renew separately. Maintenance continues while the HCU exists,
+including Completed. HCU removal stops issuance and cleans up owned delivery
+Secrets using UID/resourceVersion preconditions without depending on guest
+availability. Guest read-only profile resources may remain. HC UID replacement
+invalidates prior access and observations. Secret deletion does not revoke an
+already-issued token; its finite lifetime bounds that risk.
+
 ---
 
 ## 4. Configuring NodePool Groups
@@ -135,6 +211,35 @@ Any configuration violating these limits is immediately rejected by the validati
 ### B. Self-Healing Skip Behavior
 If an SRE specifies an `intermediateReleaseImage` (e.g. `4.13.0`), but the cluster is already running a newer version (e.g. `4.13.12` or `4.14.0` due to manual manual SRE intervention or partial rollouts), the coordinator dynamically **skips** applying the intermediate version and proceeds directly to the `targetReleaseImage`. This protects the cluster from redundant downgrade attempts.
 
+This release-path optimization is not check skipping. There is no supported
+guest-check opt-out, per-operator exclusion, health waiver or force-upgrade flag.
+
+### C. Direct Guest Gates
+
+Every decision uses a new scoped collection: CV, the complete paginated list of
+**all current** ClusterOperators, then CV again. Bounds are five seconds per
+request, ten seconds per collection, 256 operators, four MiB, and 30 seconds of
+decision age. Identity, generation, plan, payload and credential revisions are
+rechecked before each action. Persisted Ready/admission status cannot authorize it.
+
+Source baselines and pre-CP requests require strict convergence; intermediate
+verification before another hop is strict. At the final-target CP transition,
+`WorkerEntry` allows known healthy `Progressing=True`, as does `WorkerGuard`
+before each new pool action. Both still require exact target CV desired/latest
+Completed evidence, current full operator versions, availability and no degradation,
+plus independent HC/HCP/CPC and CAPI/HyperShift proofs. Healthy **old** operator
+versions still block. Final overall completion is strict (`Progressing=False`),
+including the zero-NodePool path. Existing delegated rollouts are not cancelled
+or relocked because guest evidence worsens; new disruptive actions wait.
+
+There is no expected or retained operator inventory: additions are assessed and
+removed operators disappear on the next complete snapshot, including their
+blockers/metrics. An empty/partial list never passes. This cannot prove that an
+independently expected operator is present. Successful reads prove collection
+freshness, not an operator heartbeat. Monitoring CO health **does not query firing
+alerts**; alert querying is explicitly deferred. No guest operator/OLM execution,
+intermediate worker upgrades, or Virtualization-specific checks are implemented.
+
 ---
 
 ## 7. Upgrade Progression and Lifecycle
@@ -181,6 +286,12 @@ Sets the final status once all Hosted Control Plane components and worker NodePo
 
 ### How to Pause the Operator Lifecycle
 You can request a pause at any time. Once observed, the coordinator enters read-only "Observe-Only" monitoring mode for upgrade execution. This is not a quiescence barrier: already-started HyperShift rollouts and guest operand updates can continue, external writers are not stopped, and owned locks are not released. Deletion still invokes finalizer cleanup. Do not use pause as a safe ownership handoff for competing writes or new pools.
+
+The narrow credential exception permits verification reads and TokenRequest for
+an already-owned guest identity, and **update of an existing delivery Secret**.
+Pause does not permit initial bootstrap, RBAC repair, missing-SA/Secret recreation,
+or create fallback after an update conflict/NotFound. Observation may become
+unavailable at token expiry until resume allows repair.
 
 #### Option A: Indefinite Pause
 Set `spec.pausedUntil: "true"` on your upgrade resource:

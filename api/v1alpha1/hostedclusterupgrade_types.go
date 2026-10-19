@@ -95,13 +95,26 @@ type RolloutPolicySpec struct {
 
 // HostedClusterUpgradeStatus defines the observed state of HostedClusterUpgrade
 type HostedClusterUpgradeStatus struct {
+	// GuestAccess is owned exclusively by the guest-access controller.
+	// +optional
+	GuestAccess *GuestAccessStatus `json:"guestAccess,omitempty"`
+	// GuestAssessment is owned by the upgrade controller. Historical success is
+	// diagnostic only; every new action requires a fresh scoped observation.
+	// +optional
+	GuestAssessment *GuestAssessmentStatus `json:"guestAssessment,omitempty"`
+	// WorkerAdmission records compatible stage adoption, never authorization.
+	// +optional
+	WorkerAdmission *GuestWorkerAdmission `json:"workerAdmission,omitempty"`
+
 	// InitialVersion is the observed source version for this upgrade run.
 	// It stays stable through control-plane hops and worker rollouts.
 	// +optional
 	InitialVersion string `json:"initialVersion,omitempty"`
 
 	// Phase is the current high-level state of the upgrade state machine.
-	Phase UpgradePhase `json:"phase"`
+	// It is absent until the upgrade writer initializes; access may report first.
+	// +optional
+	Phase UpgradePhase `json:"phase,omitempty"`
 
 	// PhaseBeforePause is the state to resume without restarting active rollouts.
 	// +optional
@@ -148,6 +161,91 @@ type HostedClusterUpgradeStatus struct {
 }
 
 type UpgradePhase string
+
+type GuestAssessmentStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration"`
+	// +kubebuilder:validation:Enum=Ready;Converging;Unhealthy;Unavailable;AccessDenied;IdentityMismatch;UnsupportedEvidence
+	State string `json:"state"`
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason"`
+	// +kubebuilder:validation:MaxLength=64
+	Purpose                   string       `json:"purpose"`
+	LastAttemptTime           metav1.Time  `json:"lastAttemptTime"`
+	LastSuccessfulObservation *metav1.Time `json:"lastSuccessfulObservation,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	HostedClusterUID string `json:"hostedClusterUID,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	SecretUID string `json:"secretUID,omitempty"`
+	// +kubebuilder:validation:MaxLength=128
+	SecretRevision string `json:"secretRevision,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	PlanRevision string `json:"planRevision,omitempty"`
+	// +kubebuilder:validation:MaxLength=128
+	ExpectedVersion string `json:"expectedVersion,omitempty"`
+	// +kubebuilder:validation:MaxItems=256
+	Operators []GuestOperatorSummary `json:"operators,omitempty"`
+	// +kubebuilder:validation:MaxItems=32
+	Blockers     []GuestBlocker `json:"blockers,omitempty"`
+	BlockerCount int32          `json:"blockerCount"`
+	Truncated    bool           `json:"truncated"`
+}
+
+type GuestOperatorSummary struct {
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=128
+	Version string `json:"version,omitempty"`
+}
+
+type GuestBlocker struct {
+	// +kubebuilder:validation:MaxLength=253
+	Operator string `json:"operator,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason"`
+}
+
+type GuestWorkerAdmission struct {
+	// +kubebuilder:validation:MaxLength=64
+	HostedClusterUpgradeUID string `json:"hostedClusterUpgradeUID"`
+	ObservedGeneration      int64  `json:"observedGeneration"`
+	// +kubebuilder:validation:MaxLength=64
+	HostedClusterUID string `json:"hostedClusterUID"`
+	// +kubebuilder:validation:MaxLength=64
+	ClusterID string `json:"clusterID"`
+	// +kubebuilder:validation:MaxLength=64
+	PlanRevision string `json:"planRevision"`
+	// ReleaseRevision hashes the expected version and immutable payload identity.
+	// The desired image remains in spec; it is not copied into bounded status.
+	// +kubebuilder:validation:MaxLength=64
+	ReleaseRevision string      `json:"releaseRevision"`
+	AdmittedAt      metav1.Time `json:"admittedAt"`
+}
+
+// GuestAccessStatus describes credential maintenance, not guest health or proof
+// that the observer can currently authenticate. No credentials are exposed here.
+type GuestAccessStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	Reason              string `json:"reason"`
+	MaintenanceReady    bool   `json:"maintenanceReady"`
+	CredentialAvailable bool   `json:"credentialAvailable"`
+	// ObserverUsability remains Unknown until a scoped observation is performed.
+	// +kubebuilder:validation:Enum=Unknown;Ready;Unavailable;AccessDenied
+	ObserverUsability string `json:"observerUsability"`
+	// +kubebuilder:validation:MaxLength=64
+	HostedClusterUID string `json:"hostedClusterUID,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	ClusterID string `json:"clusterID,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	ClusterVersionUID string `json:"clusterVersionUID,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	ProfileRevision string `json:"profileRevision,omitempty"`
+	// +kubebuilder:validation:MaxLength=64
+	EndpointRevision string       `json:"endpointRevision,omitempty"`
+	ExpiresAt        *metav1.Time `json:"expiresAt,omitempty"`
+}
 
 type DrainDiagnosticsStatus struct {
 	// Available means log collection succeeded, not that all drains are healthy.
