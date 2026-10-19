@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +39,16 @@ func (c *regressionClient) Get(_ context.Context, key client.ObjectKey, out clie
 func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts ...client.ListOption) error {
 	options := &client.ListOptions{}
 	options.ApplyOptions(opts)
+	if list, ok := out.(*upgradev1alpha1.HostedClusterUpgradeList); ok {
+		list.Items = nil
+		for _, obj := range c.objects {
+			u, ok := obj.(*upgradev1alpha1.HostedClusterUpgrade)
+			if ok && (options.Namespace == "" || u.Namespace == options.Namespace) && (options.FieldSelector == nil || options.FieldSelector.Matches(fields.Set{controlPlaneNamespaceField: WorkerControlPlaneNamespace(u.Namespace, u.Name)})) {
+				list.Items = append(list.Items, *u.DeepCopy())
+			}
+		}
+		return nil
+	}
 	list := out.(*unstructured.UnstructuredList)
 	list.Items = nil
 	for _, obj := range c.objects {

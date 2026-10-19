@@ -1478,7 +1478,7 @@ func (r *HostedClusterUpgradeReconciler) scrapeHCCOLogsForDrains(ctx context.Con
 	}
 
 	// HCCO is located inside the control plane namespace: <hc_namespace>-<cluster_name>
-	cpNamespace := fmt.Sprintf("%s-%s", namespace, clusterName)
+	cpNamespace := WorkerControlPlaneNamespace(namespace, clusterName)
 
 	// Retrieve logs via our mock/injectable scraper interface
 	logsBlock, err := r.LogScraper.GetHCCOLogs(ctx, cpNamespace, "hosted-cluster-config-operator")
@@ -1537,6 +1537,11 @@ func checkPausedState(pausedUntil *string) (bool, time.Duration, error) {
 
 // SetupWithManager sets up the controller with the Manager and registers our event-driven watches.
 func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &upgradev1alpha1.HostedClusterUpgrade{}, controlPlaneNamespaceField, func(obj client.Object) []string {
+		return []string{WorkerControlPlaneNamespace(obj.GetNamespace(), obj.GetName())}
+	}); err != nil {
+		return err
+	}
 	uCPC := &unstructured.Unstructured{}
 	uCPC.SetGroupVersionKind(gvkCPC)
 
@@ -1545,9 +1550,18 @@ func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) erro
 
 	uNP := &unstructured.Unstructured{}
 	uNP.SetGroupVersionKind(gvkNP)
+	uHCP := &unstructured.Unstructured{}
+	uHCP.SetGroupVersionKind(gvkHCP)
+	uMD := &unstructured.Unstructured{}
+	uMD.SetGroupVersionKind(gvkMachineDeployment)
+	uMS := &unstructured.Unstructured{}
+	uMS.SetGroupVersionKind(gvkMachineSet)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&upgradev1alpha1.HostedClusterUpgrade{}).
+		Watches(uHCP, handler.EnqueueRequestsFromMapFunc(r.mapCPCToHostedClusterUpgrade)).
+		Watches(uMD, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
+		Watches(uMS, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
 		Watches(
 			uCPC,
 			handler.EnqueueRequestsFromMapFunc(r.mapCPCToHostedClusterUpgrade),
@@ -1566,6 +1580,9 @@ func (r *HostedClusterUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) erro
 
 // mapHostedClusterToHostedClusterUpgrade maps HostedCluster events to the parent HostedClusterUpgrade.
 func (r *HostedClusterUpgradeReconciler) mapHostedClusterToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
+	if r.HostedClusterNamespace != "" && obj.GetNamespace() != r.HostedClusterNamespace {
+		return nil
+	}
 	return []reconcile.Request{
 		{
 			NamespacedName: client.ObjectKey{
@@ -1578,6 +1595,9 @@ func (r *HostedClusterUpgradeReconciler) mapHostedClusterToHostedClusterUpgrade(
 
 // mapNodePoolToHostedClusterUpgrade maps NodePool events to the parent HostedClusterUpgrade using spec.clusterName.
 func (r *HostedClusterUpgradeReconciler) mapNodePoolToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
+	if r.HostedClusterNamespace != "" && obj.GetNamespace() != r.HostedClusterNamespace {
+		return nil
+	}
 	uObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return nil
@@ -1596,36 +1616,22 @@ func (r *HostedClusterUpgradeReconciler) mapNodePoolToHostedClusterUpgrade(ctx c
 	}
 }
 
-// mapCPCToHostedClusterUpgrade maps status changes of CPC objects in <hc_ns>-<name> to parent HCU in <hc_ns> sharing <name>.
+// mapCPCToHostedClusterUpgrade reverses the normalized namespace using actual upgrades.
 func (r *HostedClusterUpgradeReconciler) mapCPCToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
-	cpcNs := obj.GetNamespace()
-	prefix := r.HostedClusterNamespace + "-"
-	if r.HostedClusterNamespace != "" && strings.HasPrefix(cpcNs, prefix) {
-		clusterName := strings.TrimPrefix(cpcNs, prefix)
-		return []reconcile.Request{
-			{
-				NamespacedName: client.ObjectKey{
-					Namespace: r.HostedClusterNamespace,
-					Name:      clusterName,
-				},
-			},
-		}
+	upgrades := &upgradev1alpha1.HostedClusterUpgradeList{}
+	opts := []client.ListOption{client.MatchingFields{controlPlaneNamespaceField: obj.GetNamespace()}}
+	if r.HostedClusterNamespace != "" {
+		opts = append(opts, client.InNamespace(r.HostedClusterNamespace))
 	}
-	// Fallback for other namespaces
-	idx := strings.Index(cpcNs, "-")
-	if idx > 0 {
-		hcNs := cpcNs[:idx]
-		clusterName := cpcNs[idx+1:]
-		return []reconcile.Request{
-			{
-				NamespacedName: client.ObjectKey{
-					Namespace: hcNs,
-					Name:      clusterName,
-				},
-			},
-		}
+	if err := r.List(ctx, upgrades, opts...); err != nil {
+		log.FromContext(ctx).Error(err, "Unable to route control-plane event", "namespace", obj.GetNamespace())
+		return nil
 	}
-	return nil
+	requests := make([]reconcile.Request, 0, len(upgrades.Items))
+	for _, upgrade := range upgrades.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&upgrade)})
+	}
+	return requests
 }
 
 // statusChangePredicate filters out non-status mutations on ControlPlaneComponent resources.
