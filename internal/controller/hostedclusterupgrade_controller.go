@@ -309,6 +309,15 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// 5. Run State Machine transitions
+	if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
+		completedImage := hcu.Status.ControlPlaneStatus.TargetReleaseImage
+		if completedImage == "" {
+			completedImage, _ = GetHostedClusterCurrentRelease(uHC)
+		}
+		if completedImage != hcu.Spec.TargetReleaseImage {
+			hcu.Status = upgradev1alpha1.HostedClusterUpgradeStatus{}
+		}
+	}
 	if hcu.Status.Phase == "" || hcu.Status.Phase == upgradev1alpha1.PhasePaused {
 		hcu.Status.Phase = upgradev1alpha1.PhaseIdle
 		hcu.Status.Message = "Ready to proceed. Initializing upgrade state machine."
@@ -603,10 +612,12 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 // updateConditions populates standard Kubernetes / GitOps conditions (Ready, Progressing, Failing)
 func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.HostedClusterUpgrade) {
+	hcu.Status.ObservedGeneration = hcu.Generation
 	now := metav1.Now()
 	// Ready Condition
 	readyCond := metav1.Condition{
 		Type:               "Ready",
+		ObservedGeneration: hcu.Generation,
 		Status:             metav1.ConditionFalse,
 		Reason:             string(hcu.Status.Phase),
 		Message:            hcu.Status.Message,
@@ -620,6 +631,7 @@ func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.H
 	// Progressing Condition
 	progressingCond := metav1.Condition{
 		Type:               "Progressing",
+		ObservedGeneration: hcu.Generation,
 		Status:             metav1.ConditionFalse,
 		Reason:             string(hcu.Status.Phase),
 		Message:            hcu.Status.Message,
@@ -639,6 +651,7 @@ func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.H
 	// Failing Condition
 	failingCond := metav1.Condition{
 		Type:               "Failing",
+		ObservedGeneration: hcu.Generation,
 		Status:             metav1.ConditionFalse,
 		Reason:             string(hcu.Status.Phase),
 		Message:            hcu.Status.Message,

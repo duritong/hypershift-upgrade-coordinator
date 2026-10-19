@@ -1,0 +1,143 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"testing"
+	"time"
+
+	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// regressionClient keeps reconciliation tests independent of envtest and records
+// spec writes separately from status writes.
+type regressionClient struct {
+	client.Client
+	objects []client.Object
+	writes int
+}
+
+func (c *regressionClient) Get(_ context.Context, key client.ObjectKey, out client.Object, _ ...client.GetOption) error {
+	for _, obj := range c.objects {
+		if client.ObjectKeyFromObject(obj) == key && reflect.TypeOf(obj) == reflect.TypeOf(out) && obj.GetObjectKind().GroupVersionKind() == out.GetObjectKind().GroupVersionKind() {
+			reflect.ValueOf(out).Elem().Set(reflect.ValueOf(obj.DeepCopyObject()).Elem())
+			return nil
+		}
+	}
+	return apierrors.NewNotFound(schema.GroupResource{Resource: "test"}, key.Name)
+}
+
+func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts ...client.ListOption) error {
+	options := &client.ListOptions{}
+	options.ApplyOptions(opts)
+	list := out.(*unstructured.UnstructuredList)
+	list.Items = nil
+	for _, obj := range c.objects {
+		u, ok := obj.(*unstructured.Unstructured)
+		if ok && u.GroupVersionKind() == list.GroupVersionKind() && (options.Namespace == "" || u.GetNamespace() == options.Namespace) {
+			list.Items = append(list.Items, *u.DeepCopy())
+		}
+	}
+	return nil
+}
+
+func (c *regressionClient) Update(_ context.Context, obj client.Object, _ ...client.UpdateOption) error {
+	c.writes++
+	return c.store(obj)
+}
+
+func (c *regressionClient) store(obj client.Object) error {
+	for i, old := range c.objects {
+		if client.ObjectKeyFromObject(old) == client.ObjectKeyFromObject(obj) && reflect.TypeOf(old) == reflect.TypeOf(obj) && old.GetObjectKind().GroupVersionKind() == obj.GetObjectKind().GroupVersionKind() {
+			c.objects[i] = obj.DeepCopyObject().(client.Object)
+			return nil
+		}
+	}
+	return fmt.Errorf("object not found: %s", obj.GetName())
+}
+
+type regressionStatusWriter struct {
+	client.SubResourceWriter
+	c *regressionClient
+}
+
+func (c *regressionClient) Status() client.SubResourceWriter {
+	return regressionStatusWriter{c: c}
+}
+
+func (s regressionStatusWriter) Update(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+	return s.c.store(obj)
+}
+
+func regressionImage(version string) string {
+	return "quay.io/ocp:" + version + "-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+}
+
+func regressionHC(version string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvkHC)
+	u.SetNamespace("clusters")
+	u.SetName("example")
+	_ = unstructured.SetNestedField(u.Object, regressionImage(version), "spec", "release", "image")
+	_ = unstructured.SetNestedSlice(u.Object, []interface{}{map[string]interface{}{
+		"state": "Completed", "version": version, "image": regressionImage(version),
+	}}, "status", "version", "history")
+	return u
+}
+
+func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedClusterUpgrade {
+	return &upgradev1alpha1.HostedClusterUpgrade{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "clusters", Name: "example", Generation: 1},
+		Spec: upgradev1alpha1.HostedClusterUpgradeSpec{TargetReleaseImage: regressionImage("4.21.0")},
+		Status: upgradev1alpha1.HostedClusterUpgradeStatus{Phase: phase},
+	}
+}
+
+func reconcileRegression(t *testing.T, c *regressionClient) *upgradev1alpha1.HostedClusterUpgrade {
+	t.Helper()
+	r := &HostedClusterUpgradeReconciler{Client: c}
+	key := client.ObjectKey{Namespace: "clusters", Name: "example"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	hcu := &upgradev1alpha1.HostedClusterUpgrade{}
+	if err := c.Get(context.Background(), key, hcu); err != nil {
+		t.Fatal(err)
+	}
+	return hcu
+}
+
+func TestCompletedUpgradeNewTarget(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhaseCompleted)
+			hcu.Status.ObservedGeneration = 1
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+			started := metav1.NewTime(time.Now().Add(-time.Hour))
+			hcu.Status.StartTime, hcu.Status.CompletionTime = &started, &started
+			if changed {
+				hcu.Generation = 2
+				hcu.Spec.TargetReleaseImage = regressionImage("4.22.0")
+			}
+			c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0")}}
+			got := reconcileRegression(t, c)
+			if changed {
+				if got.Status.Phase != upgradev1alpha1.PhasePreflightChecks || got.Status.CompletionTime != nil || got.Status.StartTime != nil || got.Status.ControlPlaneStatus.TargetReleaseImage != "" {
+					t.Fatalf("new target retained completed state: %+v", got.Status)
+				}
+			} else if got.Status.Phase != upgradev1alpha1.PhaseCompleted {
+				t.Fatalf("unchanged target restarted: %s", got.Status.Phase)
+			}
+			if got.Status.ObservedGeneration != hcu.Generation {
+				t.Fatalf("observed generation = %d, want %d", got.Status.ObservedGeneration, hcu.Generation)
+			}
+		})
+	}
+}
