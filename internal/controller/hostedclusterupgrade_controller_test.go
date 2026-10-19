@@ -114,6 +114,11 @@ func setReadyNodePoolStatus(np *unstructured.Unstructured, version string) {
 	readyWorkerFixture(np, image)
 	Expect(k8sClient.Update(context.Background(), np)).To(Succeed())
 	md := readyWorkerFixture(np, image)
+	replicas, _, _ := unstructured.NestedInt64(np.Object, "spec", "replicas")
+	_ = unstructured.SetNestedField(md.Object, replicas, "spec", "replicas")
+	for _, field := range []string{"replicas", "updatedReplicas", "readyReplicas", "availableReplicas"} {
+		_ = unstructured.SetNestedField(md.Object, replicas, "status", field)
+	}
 	mdStatus, _, _ := unstructured.NestedMap(md.Object, "status")
 	ns := &unstructured.Unstructured{}
 	ns.SetAPIVersion("v1")
@@ -135,10 +140,10 @@ func setReadyNodePoolStatus(np *unstructured.Unstructured, version string) {
 	_ = unstructured.SetNestedMap(md.Object, mdStatus, "status")
 	_ = unstructured.SetNestedField(md.Object, md.GetGeneration(), "status", "observedGeneration")
 	Expect(k8sClient.Status().Update(context.Background(), md)).To(Succeed())
-	_ = unstructured.SetNestedField(np.Object, int64(1), "status", "replicas")
+	_ = unstructured.SetNestedField(np.Object, replicas, "status", "replicas")
 	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
 		"ocpVersion": version, "kubeletVersion": "v1.32.0",
-		"readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
+		"readyNodeCount": replicas, "unreadyNodeCount": int64(0),
 	}}, "status", "nodesInfo", "nodeVersions")
 }
 
@@ -404,6 +409,10 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			npD := createAndSetStatusNodePool(ctx, "pool-d", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 			_ = unstructured.SetNestedField(npD.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npD)).To(Succeed())
+			for _, pool := range []*unstructured.Unstructured{npA, npB, npC, npD} {
+				setReadyNodePoolStatus(pool, "4.20.44")
+				Expect(k8sClient.Status().Update(ctx, pool)).To(Succeed())
+			}
 
 			defer func() {
 				_ = k8sClient.Delete(ctx, npD)
@@ -555,7 +564,9 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			// Create a NodePool with status.version = "4.20.44" (semver string, NOT pullspec!)
 			np := createAndSetStatusNodePool(ctx, "pool-semver", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
+			_ = unstructured.SetNestedField(np.Object, int64(3), "spec", "replicas")
 			Expect(k8sClient.Update(ctx, np)).To(Succeed())
+			setReadyNodePoolStatus(np, "4.20.44")
 
 			_ = unstructured.SetNestedField(np.Object, "4.20.44", "status", "version")
 			_ = unstructured.SetNestedField(np.Object, int64(3), "status", "replicas")

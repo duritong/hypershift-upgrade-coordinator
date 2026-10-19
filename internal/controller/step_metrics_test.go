@@ -180,7 +180,7 @@ func TestNodePoolStepTimersPersistAndCompleteIndependently(t *testing.T) {
 	hcu.Spec.RolloutPolicy = &upgradev1alpha1.RolloutPolicySpec{MaxParallelNodePools: 2}
 	overall := metav1.NewTime(time.Now().Add(-time.Hour))
 	hcu.Status.StartTime = &overall
-	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), regressionNP("a", ""), regressionNP("b", "")}}
+	c := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
 	got := reconcileRegression(t, c)
 	if len(got.Status.NodePoolStatuses) != 2 {
 		t.Fatalf("unexpected statuses: %+v", got.Status)
@@ -302,7 +302,7 @@ func TestStaleUpgradeGaugesAndDeletion(t *testing.T) {
 	metricNodePoolBlocked.WithLabelValues("clusters", "example", "workers", "old", "old").Set(1)
 	metricNodePoolRolloutRatio.WithLabelValues("clusters", "example", "gone").Set(0.5)
 	metricAggregatedNodeRolloutRatio.WithLabelValues("clusters", "example").Set(0.5)
-	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), regressionNP("workers", "")}}
+	c := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("workers", ""))...)}
 	got := reconcileRegression(t, c)
 	if len(got.Status.NodePoolStatuses) != 1 || got.Status.NodePoolStatuses[0].Name != "workers" {
 		t.Fatalf("disappeared pool retained status: %+v", got.Status.NodePoolStatuses)
@@ -417,7 +417,10 @@ func TestNodePoolStepTimerSurvivesLaterUpdateFailure(t *testing.T) {
 	resetStepGauges(t)
 	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 	hcu.Spec.RolloutPolicy = &upgradev1alpha1.RolloutPolicySpec{MaxParallelNodePools: 2}
-	base := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), regressionNP("a", ""), regressionNP("b", "")}}
+	base := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
+	if err := (&HostedClusterUpgradeReconciler{Client: base}).lockClusterNodePools(context.Background(), hcu); err != nil {
+		t.Fatal(err)
+	}
 	r := &HostedClusterUpgradeReconciler{Client: &stepUpdateFailureClient{regressionClient: base, failName: "b"}}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err != nil {
 		t.Fatal(err)

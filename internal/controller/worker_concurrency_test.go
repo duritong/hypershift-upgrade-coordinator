@@ -24,12 +24,12 @@ func TestWorkerOutstandingWorkReservesConcurrency(t *testing.T) {
 			_ = unstructured.SetNestedField(a.Object, "true", "spec", "pausedUntil")
 			started := metav1.NewTime(time.Now().Add(-time.Hour))
 			hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "a", Phase: "Upgrading", TargetReleaseImage: image, StartTime: &started}}
-			c := &regressionClient{objects: []client.Object{a, b}}
+			c := &regressionClient{objects: append([]client.Object{a}, quiescentWorkerFixtures(b)...)}
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)
 			}
-			if c.writes != 0 {
+			if c.writes != 1 { // Enrollment lock only; no new release work.
 				t.Fatal("started new work while paused rollout remained outstanding")
 			}
 			status := hcu.Status.NodePoolStatuses[0]

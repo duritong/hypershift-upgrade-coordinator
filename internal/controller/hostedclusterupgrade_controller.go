@@ -794,6 +794,7 @@ func restoreNodePoolLock(np *unstructured.Unstructured, hcu *upgradev1alpha1.Hos
 	annotations := np.GetAnnotations()
 	delete(annotations, workerLockOwner)
 	delete(annotations, workerLockOriginal)
+	delete(annotations, workerLockGeneration)
 	np.SetAnnotations(annotations)
 	return true, nil
 }
@@ -827,16 +828,7 @@ func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Contex
 			if _, _, err := checkPausedState(pause); err != nil {
 				return err
 			}
-			original, _ := json.Marshal(pause)
-			annotations := item.GetAnnotations()
-			if annotations == nil {
-				annotations = map[string]string{}
-			}
-			annotations[workerLockOwner] = string(hcu.UID)
-			annotations[workerLockOriginal] = string(original)
-			item.SetAnnotations(annotations)
-			_ = unstructured.SetNestedField(item.Object, "true", "spec", "pausedUntil")
-			if err := r.Update(ctx, &item); err != nil {
+			if err := r.acquireWorkerLock(ctx, hcu, &item, pause); err != nil {
 				return err
 			}
 		}
@@ -1125,6 +1117,44 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		reqLogger.Info("Parsed NodePool schema info", "name", name, "group", groupName, "pausedUntil", pUntil, "version", version)
 		groupPoolsMap[groupName] = append(groupPoolsMap[groupName], c)
 	}
+	// Enroll newly observed pools before releasing any group. An already running
+	// external rollout is not cancelled by writing a lock, and must not be queued
+	// as if it were idle. Unknown evidence is conservatively outstanding work.
+	externalWork := make(map[string]bool)
+	for group, pools := range groupPoolsMap {
+		for i := range pools {
+			np := &pools[i]
+			started := false
+			for _, previous := range hcu.Status.NodePoolStatuses {
+				if previous.Name == np.name && previous.Phase != "Completed" && (previous.StartTime != nil || previous.Phase == "Upgrading") {
+					started = true
+				}
+			}
+			if started || assessments[np.name].complete {
+				continue
+			}
+			if np.pauseErr != nil {
+				externalWork[np.name] = true
+				continue
+			}
+			q, err := r.assessWorkerQuiescence(ctx, hcu, &np.object)
+			if err != nil {
+				return false, 0, err
+			}
+			if !q.complete {
+				externalWork[np.name] = true
+				continue
+			}
+			if !np.ownedLock && !strings.EqualFold(strings.TrimSpace(np.pausedUntil), "true") {
+				pause, _, _ := nodePoolPause(&np.object, hcu)
+				if err := r.acquireWorkerLock(ctx, hcu, &np.object, pause); err != nil {
+					return false, 0, err
+				}
+				np.ownedLock, np.pausedUntil = true, "true"
+			}
+		}
+		groupPoolsMap[group] = pools
+	}
 
 	hcuStatuses := make([]upgradev1alpha1.NodePoolUpgradeStatus, len(clusterNodePools))
 	previousStatuses := hcu.Status.NodePoolStatuses
@@ -1158,22 +1188,22 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		for _, np := range pools {
 			done := assessments[np.name].complete
 			started := false
+			image, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
 			for _, previous := range previousStatuses {
 				if previous.Name != np.name || previous.Phase == "Completed" {
 					continue
 				}
 				started = previous.StartTime != nil || previous.Phase == "Upgrading"
-				if started && previous.TargetReleaseImage != "" && previous.TargetReleaseImage != targetReleaseImage {
-					a, err := r.assessWorker(ctx, &np.object, hcu.Name, previous.TargetReleaseImage)
+				if started && previous.TargetReleaseImage != "" && (previous.TargetReleaseImage != targetReleaseImage || image != targetReleaseImage) {
+					a, err := r.assessWorkerQuiescence(ctx, hcu, &np.object)
 					if err != nil {
 						return false, 0, err
 					}
-					done = a.complete
+					done = a.complete || assessments[np.name].complete
 					oldWork[np.name] = !done
 				}
 			}
-			image, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
-			if !done && (started || (image == targetReleaseImage && !np.ownedLock)) {
+			if !done && (started || externalWork[np.name] || (image == targetReleaseImage && !np.ownedLock)) {
 				reserved[np.name] = true
 				activeUpgrades++
 			}
@@ -1183,6 +1213,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	for _, outstanding := range oldWork {
 		hasOldWork = hasOldWork || outstanding
 	}
+	hasExternalWork := len(externalWork) > 0
 
 	groupUpgradeTriggered := false
 	pauseBlocked := false
@@ -1203,6 +1234,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		for _, np := range pools {
 			startTime := hcuStatuses[idx].StartTime
 			statusTarget := targetReleaseImage
+			if externalWork[np.name] {
+				statusTarget, _, _ = unstructured.NestedString(np.object.Object, "spec", "release", "image")
+			}
 			if oldWork[np.name] {
 				statusTarget = hcuStatuses[idx].TargetReleaseImage
 			}
@@ -1235,6 +1269,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				pauseBlocked = true
 				phase = "Blocked"
 				blockers = append(blockers, np.pauseErr.Error())
+				groupCompleted = false
+			} else if externalWork[np.name] {
+				phase = "Blocked"
+				blockers = append(blockers, "Externally started or unproven worker rollout is outstanding; waiting for positive quiescence")
 				groupCompleted = false
 			} else if oldWork[np.name] {
 				phase = "Blocked"
@@ -1286,7 +1324,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 					// Schedule is open. Trigger Upgrade (subject to concurrency limits or existing in-flight upgrades)
 					isAlreadyUpgrading := reserved[np.name] && npSpecRelease == targetReleaseImage
 
-					if isAlreadyUpgrading || (!hasOldWork && activeUpgrades < concurrency) {
+					if isAlreadyUpgrading || (!hasOldWork && !hasExternalWork && activeUpgrades < concurrency) {
 						phase = "Upgrading"
 						groupCompleted = false
 
@@ -1385,23 +1423,6 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 
 	return false, 0, nil
-}
-
-func isNodePoolUpdatingVersion(np *unstructured.Unstructured) bool {
-	conds, found, _ := unstructured.NestedSlice(np.Object, "status", "conditions")
-	if !found {
-		return false
-	}
-	for _, c := range conds {
-		cMap, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if cMap["type"] == "UpdatingVersion" && cMap["status"] == "True" {
-			return true
-		}
-	}
-	return false
 }
 
 // scrapeHCCOLogsForDrains scrapes HCCO logs to detect stuck node drains (utilizes injectable log scrapers).

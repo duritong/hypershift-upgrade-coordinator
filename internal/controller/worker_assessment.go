@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
@@ -18,6 +20,7 @@ var gvkMachineSet = schema.GroupVersionKind{Group: "cluster.x-k8s.io", Version: 
 const workerPoolAnnotation = "hypershift.openshift.io/nodePool"
 const workerCurrentConfig = "hypershift.openshift.io/nodePoolCurrentConfigVersion"
 const workerTargetConfig = "hypershift.openshift.io/nodePoolTargetConfigVersion"
+const workerLockGeneration = "upgrade.huc.0xshift.dev/worker-lock-quiescent-generation"
 
 // WorkerControlPlaneNamespace matches HyperShift's namespace naming, not its raw HC name.
 func WorkerControlPlaneNamespace(namespace, name string) string {
@@ -44,6 +47,71 @@ func workerCondition(np *unstructured.Unstructured, typ, status string, generati
 		return c["status"] == status && found && observed >= generation
 	}
 	return false
+}
+
+// assessWorkerQuiescence ignores only the coordinator's proven pause-only spec
+// write. Any subsequent generation change invalidates that proof. A lock write
+// cannot cancel work already delegated to CAPI/HCCO.
+func (r *HostedClusterUpgradeReconciler) assessWorkerQuiescence(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, np *unstructured.Unstructured) (workerAssessment, error) {
+	observed := np.DeepCopy()
+	_, owned, err := nodePoolPause(np, hcu)
+	if err != nil {
+		return workerAssessment{}, err
+	}
+	pause, _, _ := unstructured.NestedString(np.Object, "spec", "pausedUntil")
+	baseline, err := strconv.ParseInt(np.GetAnnotations()[workerLockGeneration], 10, 64)
+	if owned && pause == "true" && err == nil && np.GetGeneration() >= baseline && np.GetGeneration() <= baseline+1 {
+		observed.SetGeneration(baseline)
+	}
+	image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
+	return r.assessWorker(ctx, observed, hcu.Name, image)
+}
+
+// WorkerPrerequisite must be called immediately before a new control-plane
+// mutation, even when workers were locked earlier. It makes no rollout changes.
+// External writers must coordinate ownership operationally: informer observations
+// and optimistic writes cannot prevent an external write racing this check.
+func (r *HostedClusterUpgradeReconciler) WorkerPrerequisite(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade) error {
+	pools := &unstructured.UnstructuredList{}
+	pools.SetGroupVersionKind(gvkNP)
+	if err := r.List(ctx, pools, client.InNamespace(hcu.Namespace)); err != nil {
+		return err
+	}
+	for _, np := range pools.Items {
+		cluster, _, _ := unstructured.NestedString(np.Object, "spec", "clusterName")
+		if cluster != hcu.Name {
+			continue
+		}
+		a, err := r.assessWorkerQuiescence(ctx, hcu, &np)
+		if err != nil {
+			return err
+		}
+		if !a.complete {
+			return fmt.Errorf("NodePool %q is not positively quiescent: %s", np.GetName(), a.reason)
+		}
+	}
+	return nil
+}
+
+func (r *HostedClusterUpgradeReconciler) acquireWorkerLock(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, np *unstructured.Unstructured, pause *string) error {
+	a, err := r.assessWorkerQuiescence(ctx, hcu, np)
+	if err != nil {
+		return err
+	}
+	original, _ := json.Marshal(pause)
+	annotations := np.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[workerLockOwner] = string(hcu.UID)
+	annotations[workerLockOriginal] = string(original)
+	delete(annotations, workerLockGeneration)
+	if a.complete {
+		annotations[workerLockGeneration] = strconv.FormatInt(np.GetGeneration(), 10)
+	}
+	np.SetAnnotations(annotations)
+	_ = unstructured.SetNestedField(np.Object, "true", "spec", "pausedUntil")
+	return r.Update(ctx, np)
 }
 
 type workerAssessment struct {
@@ -85,11 +153,23 @@ func (r *HostedClusterUpgradeReconciler) assessWorker(ctx context.Context, np *u
 	if !found || desired < 0 {
 		return a, nil
 	}
+	if replicas, found, _ := unstructured.NestedInt64(np.Object, "spec", "replicas"); found && replicas != desired {
+		return a, nil
+	}
 	if int32(desired) > a.total {
 		a.total = int32(desired)
 	}
 	// Only CAPI can establish that an autoscaled pool intentionally has no machines.
 	if desired == 0 {
+		versions, _, _ := unstructured.NestedSlice(np.Object, "status", "nodesInfo", "nodeVersions")
+		for _, item := range versions {
+			v, _ := item.(map[string]interface{})
+			r, _, _ := unstructured.NestedInt64(v, "readyNodeCount")
+			u, _, _ := unstructured.NestedInt64(v, "unreadyNodeCount")
+			if r != 0 || u != 0 {
+				return a, nil
+			}
+		}
 		a.total = 0
 	}
 	observed, found, _ := unstructured.NestedInt64(backing.Object, "status", "observedGeneration")
@@ -97,14 +177,15 @@ func (r *HostedClusterUpgradeReconciler) assessWorker(ctx context.Context, np *u
 		return a, nil
 	}
 	for _, field := range []string{"replicas", "readyReplicas", "availableReplicas"} {
-		value, found, _ := unstructured.NestedInt64(backing.Object, "status", field)
-		if !found || value != desired {
+		// CAPI's scalar v1beta1 zero counts are omitted from JSON.
+		value, found, err := unstructured.NestedInt64(backing.Object, "status", field)
+		if err != nil || (!found && desired != 0) || value != desired {
 			return a, nil
 		}
 	}
 	if strategy == "Replace" {
-		value, found, _ := unstructured.NestedInt64(backing.Object, "status", "updatedReplicas")
-		if !found || value != desired {
+		value, found, err := unstructured.NestedInt64(backing.Object, "status", "updatedReplicas")
+		if err != nil || (!found && desired != 0) || value != desired {
 			return a, nil
 		}
 	}

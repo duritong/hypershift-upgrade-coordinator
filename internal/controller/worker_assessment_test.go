@@ -62,6 +62,16 @@ func readyWorkerFixture(np *unstructured.Unstructured, image string) *unstructur
 	return backing
 }
 
+func quiescentWorkerFixtures(pools ...*unstructured.Unstructured) []client.Object {
+	objects := []client.Object{}
+	for _, np := range pools {
+		image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
+		md := readyWorkerFixture(np, image)
+		objects = append(objects, np, md)
+	}
+	return objects
+}
+
 func TestWorkerCompletionRequiresFreshPositiveEvidence(t *testing.T) {
 	for _, defect := range []string{"missing CAPI", "stale CAPI", "surge", "unavailable", "native disagreement", "stale NP", "missing conditions", "config updating", "same version new digest"} {
 		t.Run(defect, func(t *testing.T) {
@@ -164,6 +174,9 @@ func TestWorkerAutoscalingRequiresAuthoritativeDesiredPopulation(t *testing.T) {
 		_ = unstructured.SetNestedField(md.Object, desired, "spec", "replicas")
 		for _, field := range []string{"replicas", "updatedReplicas", "readyReplicas", "availableReplicas"} {
 			_ = unstructured.SetNestedField(md.Object, int64(0), "status", field)
+			if desired == 0 {
+				unstructured.RemoveNestedField(md.Object, "status", field)
+			}
 		}
 		r := &HostedClusterUpgradeReconciler{Client: &regressionClient{objects: []client.Object{np, md}}}
 		a, err := r.assessWorker(context.Background(), np, "example", regressionImage("4.21.0"))

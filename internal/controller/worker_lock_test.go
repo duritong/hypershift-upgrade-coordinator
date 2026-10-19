@@ -18,7 +18,7 @@ func TestWorkerUserPauses(t *testing.T) {
 			hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 			np := regressionNP("workers", "")
 			_ = unstructured.SetNestedField(np.Object, pause, "spec", "pausedUntil")
-			c := &regressionClient{objects: []client.Object{np}}
+			c := &regressionClient{objects: quiescentWorkerFixtures(np)}
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if pause == "true" {
 				if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
@@ -29,7 +29,11 @@ func TestWorkerUserPauses(t *testing.T) {
 				}
 			}
 			_, delay, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0"))
-			if err != nil || c.writes != 0 || len(hcu.Status.NodePoolStatuses[0].Blockers) == 0 || hcu.Status.NodePoolStatuses[0].StartTime != nil {
+			wantWrites := 0
+			if pause != "true" {
+				wantWrites = 1
+			}
+			if err != nil || c.writes != wantWrites || len(hcu.Status.NodePoolStatuses[0].Blockers) == 0 || hcu.Status.NodePoolStatuses[0].StartTime != nil {
 				t.Fatalf("user pause not respected: err=%v writes=%d status=%+v", err, c.writes, hcu.Status)
 			}
 			if pause != "true" && (delay <= 0 || delay > 5*time.Minute) {
@@ -138,7 +142,7 @@ func TestWorkerTimedPauseExpiresDuringControlPlane(t *testing.T) {
 	np := regressionNP("workers", "")
 	original := time.Now().Add(2 * time.Second).UTC().Format(time.RFC3339)
 	_ = unstructured.SetNestedField(np.Object, original, "spec", "pausedUntil")
-	c := &regressionClient{objects: []client.Object{np}}
+	c := &regressionClient{objects: quiescentWorkerFixtures(np)}
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -184,10 +188,7 @@ func TestWorkerLockRestoresOriginal(t *testing.T) {
 					_ = unstructured.SetNestedField(np.Object, "4.21.0", "status", "version")
 					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
 				}
-				c := &regressionClient{objects: []client.Object{np}}
-				if completed {
-					c.objects = append(c.objects, readyWorkerFixture(np, hcu.Spec.TargetReleaseImage))
-				}
+				c := &regressionClient{objects: quiescentWorkerFixtures(np)}
 				r := &HostedClusterUpgradeReconciler{Client: c}
 				if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 					t.Fatal(err)
@@ -252,7 +253,7 @@ func TestWorkerLocksRespectGroupAndConcurrency(t *testing.T) {
 	hcu.UID = "upgrade-uid"
 	hcu.Spec.NodePoolGroups = []upgradev1alpha1.NodePoolGroupSpec{{Name: "first"}}
 	a, b, later := regressionNP("a", "first"), regressionNP("b", "first"), regressionNP("later", "")
-	c := &regressionClient{objects: []client.Object{a, b, later}}
+	c := &regressionClient{objects: quiescentWorkerFixtures(a, b, later)}
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -304,13 +305,13 @@ func TestWorkerUserUnpauseDoesNotInventStepStart(t *testing.T) {
 	}
 }
 
-func TestWorkerFuturePauseRetainsLockWhileOtherPoolRuns(t *testing.T) {
+func TestWorkerFuturePauseCannotHidePreexistingRollout(t *testing.T) {
 	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 	hcu.UID = "upgrade-uid"
 	paused, other := regressionNP("paused", ""), regressionNP("other", "")
 	_ = unstructured.SetNestedField(paused.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedField(paused.Object, time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "spec", "pausedUntil")
-	c := &regressionClient{objects: []client.Object{paused, other}}
+	c := &regressionClient{objects: append([]client.Object{paused}, quiescentWorkerFixtures(other)...)}
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -322,7 +323,7 @@ func TestWorkerFuturePauseRetainsLockWhileOtherPoolRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, _, _ := unstructured.NestedString(paused.Object, "spec", "pausedUntil")
-	if value != "true" || hcu.Status.NodePoolStatuses[1].StartTime == nil {
+	if value != "true" || hcu.Status.NodePoolStatuses[1].StartTime != nil || hcu.Status.NodePoolStatuses[0].Phase != "Blocked" {
 		t.Fatalf("future pause can bypass concurrency at expiry: %+v", hcu.Status)
 	}
 }
