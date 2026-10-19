@@ -317,6 +317,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		if getErr := r.Get(ctx, client.ObjectKey{Namespace: hcu.Namespace, Name: hcu.Name}, uHC); getErr != nil {
 			uHC = nil
 		}
+		if uHC != nil && hcu.Status.InitialVersion == "" {
+			_, hcu.Status.InitialVersion = GetHostedClusterCurrentRelease(uHC)
+		}
 
 		expectedCPVer, _ := upgradev1alpha1.ExtractVersion(hcu.Status.ControlPlaneStatus.TargetReleaseImage)
 		_ = r.aggregateControlPlaneStatus(ctx, hcu, expectedCPVer)
@@ -364,6 +367,10 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if hcu.Status.InitialVersion == "" {
+		_, hcu.Status.InitialVersion = GetHostedClusterCurrentRelease(uHC)
 	}
 
 	// Admission may have been bypassed, and the cluster may have changed since
@@ -432,6 +439,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		if completedImage != hcu.Spec.TargetReleaseImage {
 			hcu.Status = upgradev1alpha1.HostedClusterUpgradeStatus{}
+			_, hcu.Status.InitialVersion = GetHostedClusterCurrentRelease(uHC)
 		}
 	}
 	if hcu.Status.Phase == "" {
@@ -939,8 +947,8 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 	case upgradev1alpha1.PhasePaused:
 		phaseVal = 8
 	}
-	var currentVer string
-	if uHC != nil {
+	currentVer := hcu.Status.InitialVersion
+	if currentVer == "" && uHC != nil {
 		_, currentVer = GetHostedClusterCurrentRelease(uHC)
 	}
 	if currentVer == "" {
@@ -961,18 +969,13 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 				continue
 			}
 			livePools[np.GetName()] = true
-			version, _, _ := unstructured.NestedString(np.Object, "status", "version")
-			if version == "" {
-				version, _, _ = unstructured.NestedString(np.Object, "spec", "release", "image")
-			}
-			npVer, _ := upgradev1alpha1.ExtractVersion(version)
 			var blocked float64
 			for _, status := range hcu.Status.NodePoolStatuses {
 				if status.Name == np.GetName() && status.TargetReleaseImage == hcu.Spec.TargetReleaseImage && len(status.Blockers) > 0 {
 					blocked = 1
 				}
 			}
-			metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), npVer, targetVer).Set(blocked)
+			metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), currentVer, targetVer).Set(blocked)
 			assessment, assessmentErr := r.assessWorker(ctx, &np, hcu.Name, hcu.Spec.TargetReleaseImage)
 			replicas, upgraded, readyNodes := assessment.total, assessment.updated, assessment.ready
 			total += replicas
@@ -989,7 +992,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 						status.Phase = "Completed"
 						status.StartTime = nil
 						status.Blockers = nil
-						metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), npVer, targetVer).Set(0)
+						metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), currentVer, targetVer).Set(0)
 					}
 				}
 			}

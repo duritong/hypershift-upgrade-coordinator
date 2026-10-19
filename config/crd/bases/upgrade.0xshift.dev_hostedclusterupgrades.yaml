@@ -332,6 +332,11 @@ spec:
                 - available
                 - reason
                 type: object
+              initialVersion:
+                description: |-
+                  InitialVersion is the observed source version for this upgrade run.
+                  It stays stable through control-plane hops and worker rollouts.
+                type: string
               message:
                 description: |-
                   Message describes the current step, pending schedules, or active blocker details.

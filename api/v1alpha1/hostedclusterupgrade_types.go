@@ -95,6 +95,11 @@ type RolloutPolicySpec struct {
 
 // HostedClusterUpgradeStatus defines the observed state of HostedClusterUpgrade
 type HostedClusterUpgradeStatus struct {
+	// InitialVersion is the observed source version for this upgrade run.
+	// It stays stable through control-plane hops and worker rollouts.
+	// +optional
+	InitialVersion string `json:"initialVersion,omitempty"`
+
 	// Phase is the current high-level state of the upgrade state machine.
 	Phase UpgradePhase `json:"phase"`
 

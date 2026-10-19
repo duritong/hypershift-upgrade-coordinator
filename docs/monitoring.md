@@ -42,7 +42,13 @@ durable history of completed step durations.
 | `$current_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, current_version)` |
 | `$target_version` | Query, multi-select with All | `label_values(hypershift_upgrade_phase, target_version)` |
 
-Version filters use the labels exported by the coordinator. `current_version` is intended to represent the upgrade's origin version; retaining that origin throughout a rollout is a controller responsibility, not something the dashboard reconstructs.
+Version filters use the labels exported by the coordinator. `current_version`
+comes from persisted `status.initialVersion`, the upgrade run's origin version.
+It does not change when intermediate or target control-plane releases complete.
+Worker blocked gauges use the same origin label so fleet filters remain valid
+even when a pool started at a different version. A new run after completion
+records its own origin. Existing runs without an origin record their first
+observable version after the coordinator is updated.
 
 ### Dashboard Panels
 
