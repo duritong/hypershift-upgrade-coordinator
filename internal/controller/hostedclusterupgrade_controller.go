@@ -1609,23 +1609,25 @@ func GetHostedClusterCurrentRelease(uHC *unstructured.Unstructured) (string, str
 	return specImg, specVer
 }
 
-// GetNodePoolNodeCounts extracts total, updated, and ready node counts from NodePool status.
+// GetNodePoolNodeCounts returns observed population, target-version nodes and
+// target-ready nodes. CAPI desired replicas must additionally gate completion.
 func GetNodePoolNodeCounts(np *unstructured.Unstructured, targetReleaseImage string) (int32, int32, int32) {
-	totalReplicas, observed, _ := unstructured.NestedInt64(np.Object, "status", "replicas")
+	// HyperShift copies AvailableReplicas here, not the total machine population.
+	totalReplicas, _, _ := unstructured.NestedInt64(np.Object, "status", "replicas")
 	desiredReplicas, desired, _ := unstructured.NestedInt64(np.Object, "spec", "replicas")
 	if desired && desiredReplicas > totalReplicas {
 		totalReplicas = desiredReplicas
 	}
-	if !observed && !desired {
+	if !desired && totalReplicas == 0 {
 		// Missing status is not evidence of an intentionally scaled-to-zero pool.
 		totalReplicas = 1
 	}
-	total := int32(totalReplicas)
 
 	targetVer, err := upgradev1alpha1.ExtractVersion(targetReleaseImage)
 
 	var updatedSum int32
 	var readySum int32
+	var population int64
 
 	nodeVersions, found, _ := unstructured.NestedSlice(np.Object, "status", "nodesInfo", "nodeVersions")
 	if found {
@@ -1638,18 +1640,22 @@ func GetNodePoolNodeCounts(np *unstructured.Unstructured, targetReleaseImage str
 			rCount, _, _ := unstructured.NestedInt64(vMap, "readyNodeCount")
 			uCount, _, _ := unstructured.NestedInt64(vMap, "unreadyNodeCount")
 
-			readySum += int32(rCount)
+			population += rCount + uCount
 
 			if err == nil && ocpVer != "" {
 				extractedOcpVer, errExt := upgradev1alpha1.ExtractVersion(ocpVer)
 				if errExt == nil && extractedOcpVer == targetVer {
 					updatedSum += int32(rCount + uCount)
+					readySum += int32(rCount)
 				}
 			}
 		}
 	}
 
-	return total, updatedSum, readySum
+	if population > totalReplicas {
+		totalReplicas = population
+	}
+	return int32(totalReplicas), updatedSum, readySum
 }
 
 // checkClusterInstallingAndHealth checks if the cluster is currently installing or contains failing/degraded conditions.
