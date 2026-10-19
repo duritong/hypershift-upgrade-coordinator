@@ -339,6 +339,10 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		hcu.Status.Phase = hcu.Status.PhaseBeforePause
 		hcu.Status.PhaseBeforePause = ""
 	}
+	if hcu.Status.Phase == upgradev1alpha1.PhaseUpgradingNodePools && hcu.Status.ControlPlaneStatus.TargetReleaseImage != "" && hcu.Status.ControlPlaneStatus.TargetReleaseImage != hcu.Spec.TargetReleaseImage {
+		// A changed plan must verify its new control plane before touching workers.
+		hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingControlPlane
+	}
 	if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
 		completedImage := hcu.Status.ControlPlaneStatus.TargetReleaseImage
 		if completedImage == "" {
@@ -513,6 +517,18 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		expectedVer, _ := upgradev1alpha1.ExtractVersion(expectedRelease)
 		targetVer, _ := upgradev1alpha1.ExtractVersion(hcu.Spec.TargetReleaseImage)
+		_, completedVer := GetHostedClusterCurrentRelease(uHC)
+		if upgradev1alpha1.IsUpstreamGreater(expectedVer, completedVer) {
+			if completedVer != targetVer {
+				hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingControlPlane
+				hcu.Status.Message = "Saved control plane hop already passed. Re-evaluating the remaining upgrade path."
+				break
+			}
+			expectedRelease = hcu.Spec.TargetReleaseImage
+			expectedVer = targetVer
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = expectedRelease
+			hcu.Status.ControlPlaneStatus.StartTime = nil
+		}
 
 		// Re-aggregate CPC status filtering by expectedVer
 		if err := r.aggregateControlPlaneStatus(ctx, hcu, expectedVer); err != nil {

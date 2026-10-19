@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -50,5 +51,56 @@ func TestPauseObservesWorkerCompletion(t *testing.T) {
 	got := reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhasePaused || c.writes != 0 || got.Status.AggregatedNodeStatus.Ready != 1 || got.Status.NodePoolStatuses[0].Phase != "Completed" {
 		t.Fatalf("pause did not observe worker completion without actuation: status=%+v writes=%d", got.Status, c.writes)
+	}
+}
+
+func TestPausedTargetChangeUpgradesControlPlaneFirst(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+	hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+	paused := "true"
+	hcu.Spec.PausedUntil = &paused
+	np := regressionNP("workers", "")
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np}}
+	got := reconcileRegression(t, c)
+	got.Spec.TargetReleaseImage = regressionImage("4.22.0")
+	got.Spec.PausedUntil = nil
+	if err := c.store(got); err != nil {
+		t.Fatal(err)
+	}
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane || got.Status.ControlPlaneStatus.TargetReleaseImage != got.Spec.TargetReleaseImage {
+		t.Fatalf("new target bypassed control plane: %+v", got.Status)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(np), np); err != nil {
+		t.Fatal(err)
+	}
+	image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
+	if image == got.Spec.TargetReleaseImage {
+		t.Fatal("workers advanced before control plane verification")
+	}
+}
+
+func TestResumeVerifiesTargetWhenIntermediatePassed(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseVerifyingControlPlane)
+	hcu.Spec.IntermediateReleaseImage = regressionImage("4.21.0")
+	hcu.Spec.TargetReleaseImage = regressionImage("4.22.0")
+	hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.IntermediateReleaseImage
+	paused := "true"
+	hcu.Spec.PausedUntil = &paused
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), readyStepCPC("4.21.0")}}
+	got := reconcileRegression(t, c)
+	if err := c.store(regressionHC("4.22.0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.store(readyStepCPC("4.22.0")); err != nil {
+		t.Fatal(err)
+	}
+	got.Spec.PausedUntil = nil
+	if err := c.store(got); err != nil {
+		t.Fatal(err)
+	}
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseUpgradingNodePools || got.Status.ControlPlaneStatus.TargetReleaseImage != got.Spec.TargetReleaseImage {
+		t.Fatalf("recovery stuck verifying passed intermediate: %+v", got.Status)
 	}
 }
