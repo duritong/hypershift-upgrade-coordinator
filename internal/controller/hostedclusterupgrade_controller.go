@@ -1415,6 +1415,7 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 // aggregateControlPlaneStatus queries and copies the individual states of the ControlPlaneComponents.
 func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, expectedVer string) error {
 	cpNamespace := fmt.Sprintf("%s-%s", hcu.Namespace, hcu.Name)
+	metricComponentReady.DeletePartialMatch(prometheus.Labels{"namespace": hcu.Namespace, "name": hcu.Name})
 
 	uList := &unstructured.UnstructuredList{}
 	uList.SetGroupVersionKind(gvkCPC)
@@ -1502,6 +1503,14 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 			}
 			blockers = append(blockers, fmt.Sprintf("Component '%s' is not ready: %s", name, blockDetail))
 		}
+		var readiness float64
+		if available {
+			readiness = 1
+			if rolloutComplete && versionMatches {
+				readiness = 2
+			}
+		}
+		metricComponentReady.WithLabelValues(hcu.Namespace, hcu.Name, name).Set(readiness)
 
 		components[i] = upgradev1alpha1.ControlPlaneComponentStatus{
 			Name:            name,
