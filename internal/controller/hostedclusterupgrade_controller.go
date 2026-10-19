@@ -448,6 +448,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		baseline, _ := GetHostedClusterCurrentRelease(uHC)
 		desired, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(baseline, desired) {
+			if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
+				hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+				hcu.Status.Message = err.Error()
+				break
+			}
 			next, planErr := plannedControlPlaneRelease(uHC, hcu)
 			if planErr != nil {
 				hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
@@ -552,6 +557,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Apply the version change on the HostedCluster spec!
+		if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
+			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			hcu.Status.Message = err.Error()
+			break
+		}
 		if err := canInitiateControlPlane(uHC); err != nil {
 			hcu.Status.Message = err.Error()
 			stateRequeueAfter = 10 * time.Second

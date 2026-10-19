@@ -199,3 +199,43 @@ func TestUpgradeabilityIsOnlyANewControlPlaneGate(t *testing.T) {
 		}
 	}
 }
+
+func TestWholeControlPlanePathWorkerSkew(t *testing.T) {
+	for _, defect := range []string{"too old next hop", "too old final hop", "newer worker", "old bucket", "missing status", "missing buckets", "missing bucket version", "safe"} {
+		for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhasePreflightChecks, upgradev1alpha1.PhaseUpgradingControlPlane} {
+			t.Run(defect+"/"+string(phase), func(t *testing.T) {
+				hcu := regressionHCU(phase)
+				hc := regressionHC("4.20.0")
+				np := regressionNP("workers", "")
+				worker := "4.18.0"
+				switch defect {
+				case "too old next hop":
+					worker = "4.17.0"
+				case "too old final hop":
+					hcu.Spec.IntermediateReleaseImage = regressionImage("4.21.0")
+					hcu.Spec.TargetReleaseImage = regressionImage("4.22.0")
+				case "newer worker":
+					worker = "4.20.1"
+				}
+				md := readyWorkerFixture(np, regressionImage(worker))
+				switch defect {
+				case "old bucket":
+					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.17.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
+				case "missing status":
+					unstructured.RemoveNestedField(np.Object, "status", "version")
+				case "missing buckets":
+					unstructured.RemoveNestedField(np.Object, "status", "nodesInfo")
+				case "missing bucket version":
+					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
+				}
+				c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+				addReadyCP(c, hc)
+				r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
+				_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)})
+				if (c.writes > 0) != (defect == "safe") {
+					t.Fatalf("whole path safety: %s allowed writes=%d", defect, c.writes)
+				}
+			})
+		}
+	}
+}

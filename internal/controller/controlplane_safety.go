@@ -25,6 +25,60 @@ func canInitiateControlPlane(hc *unstructured.Unstructured) error {
 	return fmt.Errorf("a new control plane release requires ClusterVersionUpgradeable=True")
 }
 
+// Workers remain at their actual versions throughout all CP hops. A numerically
+// valid CP path can still violate HyperShift's same-major n-3 worker skew.
+func (r *HostedClusterUpgradeReconciler) validateControlPlaneWorkerSkew(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, hc *unstructured.Unstructured) error {
+	_, current := GetHostedClusterCurrentRelease(hc)
+	path := []string{current}
+	for _, image := range []string{hcu.Spec.IntermediateReleaseImage, hcu.Spec.TargetReleaseImage} {
+		if image == "" {
+			continue
+		}
+		version, err := upgradev1alpha1.ExtractVersion(image)
+		if err != nil {
+			return err
+		}
+		if upgradev1alpha1.IsUpstreamGreater(current, version) {
+			path = append(path, version)
+		}
+	}
+	pools := &unstructured.UnstructuredList{}
+	pools.SetGroupVersionKind(gvkNP)
+	if err := r.List(ctx, pools, client.InNamespace(hcu.Namespace)); err != nil {
+		return err
+	}
+	for _, np := range pools.Items {
+		cluster, _, _ := unstructured.NestedString(np.Object, "spec", "clusterName")
+		if cluster != hcu.Name {
+			continue
+		}
+		version, _, _ := unstructured.NestedString(np.Object, "status", "version")
+		versions := []string{version}
+		buckets, found, err := unstructured.NestedSlice(np.Object, "status", "nodesInfo", "nodeVersions")
+		if err != nil || !found || len(buckets) == 0 {
+			return fmt.Errorf("NodePool %q is missing actual node version buckets; cannot prove planned CP skew", np.GetName())
+		}
+		for _, item := range buckets {
+			bucket, _ := item.(map[string]interface{})
+			version, _ := bucket["ocpVersion"].(string)
+			versions = append(versions, version)
+		}
+		for _, worker := range versions {
+			major, minor, err := upgradev1alpha1.GetMajorMinor(worker)
+			if _, versionErr := upgradev1alpha1.ExtractVersion(worker); err != nil || versionErr != nil {
+				return fmt.Errorf("NodePool %q has missing or invalid actual worker version %q", np.GetName(), worker)
+			}
+			for _, cp := range path {
+				cpMajor, cpMinor, err := upgradev1alpha1.GetMajorMinor(cp)
+				if err != nil || major != cpMajor || minor > cpMinor || cpMinor-minor > 3 || upgradev1alpha1.IsUpstreamGreater(cp, worker) {
+					return fmt.Errorf("NodePool %q worker %s violates same-major n-3 skew at planned CP %s", np.GetName(), worker, cp)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Payload identity is independent of registry mirrors and human-readable tags.
 // Never fall back to version equality when comparing immutable payloads.
 func samePayload(a, b string) bool {

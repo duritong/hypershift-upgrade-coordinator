@@ -74,14 +74,18 @@ func TestWorkerLockFailureStopsControlPlane(t *testing.T) {
 				np := base.objects[2].(*unstructured.Unstructured)
 				base.objects = append(base.objects, readyWorkerFixture(np, regressionImage("4.20.0")))
 				r := &HostedClusterUpgradeReconciler{Client: &workerLockFailureClient{regressionClient: base, failList: failList}, ReleaseResolver: fixtureReleaseResolver{}}
-				if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err == nil {
+				if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err == nil && !failList {
 					t.Fatal("lock failure did not propagate")
 				}
 				got := &upgradev1alpha1.HostedClusterUpgrade{}
 				if err := base.Get(context.Background(), client.ObjectKeyFromObject(hcu), got); err != nil {
 					t.Fatal(err)
 				}
-				if base.writes != 0 || got.Status.Phase != phase || got.Status.ControlPlaneStatus.StartTime != nil {
+				wantPhase := phase
+				if failList {
+					wantPhase = upgradev1alpha1.PhaseBlocked // Skew inspection fails before lock acquisition.
+				}
+				if base.writes != 0 || got.Status.Phase != wantPhase || got.Status.ControlPlaneStatus.StartTime != nil {
 					t.Fatalf("advanced after lock failure: writes=%d status=%+v", base.writes, got.Status)
 				}
 			})
