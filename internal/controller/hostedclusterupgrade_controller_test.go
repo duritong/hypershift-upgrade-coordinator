@@ -81,6 +81,7 @@ func createAndSetStatusHostedCluster(ctx context.Context, name, namespace, relea
 	_ = unstructured.SetNestedSlice(hc.Object, history, "status", "version", "history")
 	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
 	_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
+	setHealthyHostedClusterStatus(hc)
 
 	Expect(k8sClient.Status().Update(ctx, hc)).To(Succeed())
 

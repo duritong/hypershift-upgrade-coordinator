@@ -1731,6 +1731,7 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 	}
 
 	conds, foundConds, _ := unstructured.NestedSlice(uHC.Object, "status", "conditions")
+	positive := map[string]bool{"Available": false, "ClusterVersionAvailable": false, "ClusterVersionSucceeding": false}
 	if foundConds {
 		for _, c := range conds {
 			condMap, ok := c.(map[string]interface{})
@@ -1740,6 +1741,12 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 			cType, _ := condMap["type"].(string)
 			cStatus, _ := condMap["status"].(string)
 			cMsg, _ := condMap["message"].(string)
+			if _, required := positive[cType]; required {
+				if cStatus != "True" {
+					return false, fmt.Errorf("HostedCluster %s=%s: %s", cType, cStatus, cMsg)
+				}
+				positive[cType] = true
+			}
 
 			if cType == "Failing" && cStatus == "True" {
 				return false, fmt.Errorf("HostedCluster contains failing condition: %s", cMsg)
@@ -1756,6 +1763,11 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 			if cType == "ValidHostedControlPlaneConfiguration" && cStatus == "False" {
 				return false, fmt.Errorf("HostedCluster has invalid control plane configuration: %s", cMsg)
 			}
+		}
+	}
+	for _, typ := range []string{"Available", "ClusterVersionAvailable", "ClusterVersionSucceeding"} {
+		if !positive[typ] {
+			return false, fmt.Errorf("HostedCluster is missing positive %s readiness", typ)
 		}
 	}
 

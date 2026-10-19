@@ -91,7 +91,19 @@ func regressionHC(version string) *unstructured.Unstructured {
 	_ = unstructured.SetNestedSlice(u.Object, []interface{}{map[string]interface{}{
 		"state": "Completed", "version": version, "image": regressionImage(version),
 	}}, "status", "version", "history")
+	setHealthyHostedClusterStatus(u)
 	return u
+}
+
+func setHealthyHostedClusterStatus(hc *unstructured.Unstructured) {
+	conditions := []interface{}{}
+	for _, typ := range []string{"Available", "ClusterVersionAvailable", "ClusterVersionSucceeding", "ClusterVersionUpgradeable"} {
+		conditions = append(conditions, map[string]interface{}{
+			"type": typ, "status": "True", "reason": "AsExpected", "message": "Ready",
+			"lastTransitionTime": time.Now().Format(time.RFC3339), "observedGeneration": hc.GetGeneration(),
+		})
+	}
+	_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
 }
 
 func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedClusterUpgrade {
