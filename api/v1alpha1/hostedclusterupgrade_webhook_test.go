@@ -33,10 +33,14 @@ import (
 
 type upgradePathTestClient struct {
 	client.Client
-	hc *unstructured.Unstructured
+	hc    *unstructured.Unstructured
+	calls *int
 }
 
 func (c upgradePathTestClient) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	if c.calls != nil {
+		*c.calls++
+	}
 	*obj.(*unstructured.Unstructured) = *c.hc.DeepCopy()
 	return nil
 }
@@ -89,6 +93,69 @@ func TestWebhookUpgradePath(t *testing.T) {
 	}
 }
 
+func TestWebhookLocalValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*HostedClusterUpgradeSpec)
+		field  string
+	}{
+		{"omitted", func(*HostedClusterUpgradeSpec) {}, ""},
+		{"positive concurrency", func(s *HostedClusterUpgradeSpec) { s.RolloutPolicy = &RolloutPolicySpec{MaxParallelNodePools: 2} }, ""},
+		{"zero concurrency", func(s *HostedClusterUpgradeSpec) { s.RolloutPolicy = &RolloutPolicySpec{} }, "maxParallelNodePools"},
+		{"negative concurrency", func(s *HostedClusterUpgradeSpec) { s.RolloutPolicy = &RolloutPolicySpec{MaxParallelNodePools: -1} }, "maxParallelNodePools"},
+		{"empty group", func(s *HostedClusterUpgradeSpec) { s.NodePoolGroups = []NodePoolGroupSpec{{Name: ""}} }, "nodePoolGroups"},
+		{"whitespace group", func(s *HostedClusterUpgradeSpec) { s.NodePoolGroups = []NodePoolGroupSpec{{Name: " \t"}} }, "nodePoolGroups"},
+		{"duplicate groups", func(s *HostedClusterUpgradeSpec) {
+			s.NodePoolGroups = []NodePoolGroupSpec{{Name: "infra"}, {Name: "infra"}}
+		}, "nodePoolGroups"},
+		{"distinct groups", func(s *HostedClusterUpgradeSpec) {
+			s.NodePoolGroups = []NodePoolGroupSpec{{Name: "infra"}, {Name: "default"}}
+		}, ""},
+		{"invalid pause", func(s *HostedClusterUpgradeSpec) { value := "tomorrow"; s.PausedUntil = &value }, "pausedUntil"},
+		{"whitespace pause", func(s *HostedClusterUpgradeSpec) { value := " "; s.PausedUntil = &value }, "pausedUntil"},
+		{"invalid timestamp", func(s *HostedClusterUpgradeSpec) { value := "2026-02-30T00:00:00Z"; s.PausedUntil = &value }, "pausedUntil"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, withClient := range []bool{false, true} {
+				calls := 0
+				v := &HostedClusterUpgradeCustomValidator{}
+				if withClient {
+					v.Client = upgradePathTestClient{hc: createMockHostedCluster("cluster", "clusters", "quay.io/ocp:4.20.0-x86_64@sha256:"+strings.Repeat("a", 64)), calls: &calls}
+				}
+				old := &HostedClusterUpgrade{Spec: HostedClusterUpgradeSpec{TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("a", 64)}}
+				obj := old.DeepCopy()
+				tt.change(&obj.Spec)
+				for _, operation := range []string{"create", "unchanged images", "changed images"} {
+					calls = 0
+					var err error
+					if operation == "create" {
+						_, err = v.ValidateCreate(context.Background(), obj)
+					} else {
+						previous := old.DeepCopy()
+						if operation == "changed images" {
+							previous.Spec.TargetReleaseImage = "previous-image"
+						}
+						_, err = v.ValidateUpdate(context.Background(), previous, obj)
+					}
+					if tt.field == "" && err != nil || tt.field != "" && (err == nil || !strings.Contains(err.Error(), tt.field)) {
+						t.Errorf("%s (client=%t): error = %v, want field %q", operation, withClient, err, tt.field)
+					}
+					if tt.field != "" && calls != 0 {
+						t.Errorf("%s: cluster lookup preceded local validation", operation)
+					}
+				}
+			}
+		})
+	}
+	for _, value := range []string{"", "true", "True", "TRUE", "false", "False", "FALSE", "2026-01-01T00:00:00Z", "2027-01-01T00:00:00.123+02:00"} {
+		obj := &HostedClusterUpgrade{Spec: HostedClusterUpgradeSpec{PausedUntil: &value}}
+		v := &HostedClusterUpgradeCustomValidator{}
+		if _, err := v.ValidateCreate(context.Background(), obj); err != nil {
+			t.Errorf("valid pause %q rejected: %v", value, err)
+		}
+	}
+}
+
 func TestAdmissionDigestOnlyCurrentRelease(t *testing.T) {
 	hc := createMockHostedCluster("cluster", "clusters", "quay.io/ocp@sha256:"+strings.Repeat("a", 64))
 	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{map[string]interface{}{
@@ -129,6 +196,50 @@ var _ = Describe("HostedClusterUpgrade Webhook validations", func() {
 		var (
 			nsName = "default"
 		)
+
+		It("should default omitted concurrency but reject explicit invalid local fields on create and update", func() {
+			ctx := context.Background()
+			hc := createMockHostedCluster("local-fields", nsName, "quay.io/ocp:4.20.0-x86_64@sha256:"+strings.Repeat("a", 64))
+			Expect(k8sClient.Create(ctx, hc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, hc) }()
+			obj := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": GroupVersion.String(), "kind": "HostedClusterUpgrade",
+				"metadata": map[string]interface{}{"name": hc.GetName(), "namespace": nsName},
+				"spec": map[string]interface{}{
+					"targetReleaseImage": "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("a", 64),
+					"controlPlane":       map[string]interface{}{}, "rolloutPolicy": map[string]interface{}{},
+				},
+			}}
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, obj) }()
+			parallel, found, err := unstructured.NestedInt64(obj.Object, "spec", "rolloutPolicy", "maxParallelNodePools")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(parallel).To(Equal(int64(1)))
+			for _, tt := range []struct {
+				path  []string
+				value interface{}
+				field string
+			}{
+				{[]string{"spec", "rolloutPolicy", "maxParallelNodePools"}, int64(0), "maxParallelNodePools"},
+				{[]string{"spec", "rolloutPolicy", "maxParallelNodePools"}, int64(-1), "maxParallelNodePools"},
+				{[]string{"spec", "nodePoolGroups"}, []interface{}{map[string]interface{}{"name": ""}}, "name"},
+				{[]string{"spec", "nodePoolGroups"}, []interface{}{map[string]interface{}{"name": " \t"}}, "nodePoolGroups"},
+				{[]string{"spec", "nodePoolGroups"}, []interface{}{map[string]interface{}{"name": "infra"}, map[string]interface{}{"name": "infra"}}, "nodePoolGroups"},
+				{[]string{"spec", "pausedUntil"}, "not-a-time", "pausedUntil"},
+			} {
+				candidate := obj.DeepCopy()
+				Expect(unstructured.SetNestedField(candidate.Object, tt.value, tt.path...)).To(Succeed())
+				err := k8sClient.Update(ctx, candidate)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(tt.field))
+				candidate.SetResourceVersion("")
+				candidate.SetName("missing-local-fields")
+				err = k8sClient.Create(ctx, candidate)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(tt.field))
+			}
+		})
 
 		It("should reject HostedClusterUpgrade CR if target HostedCluster does not exist", func() {
 			hcu := &HostedClusterUpgrade{

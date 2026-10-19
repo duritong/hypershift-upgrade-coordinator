@@ -71,6 +71,7 @@ type ControlPlaneUpgradeSpec struct {
 type NodePoolGroupSpec struct {
 	// Name specifies the exact name of the NodePool group (defined by label upgrade.huc.0xshift.dev/group on individual NodePools).
 	// +required
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// StartAt is an RFC3339 timestamp indicating the earliest time this specific NodePool group upgrade may begin.
@@ -84,9 +85,11 @@ type NodePoolGroupSpec struct {
 type RolloutPolicySpec struct {
 	// MaxParallelNodePools specifies the maximum number of NodePools that can be
 	// upgraded in parallel within the same priority group.
-	// Defaults to 1.
+	// Defaults to 1 when omitted in JSON. A zero Go value is omitted by omitempty;
+	// an explicit JSON zero or a provided zero policy in direct validation is invalid.
 	// +optional
 	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
 	MaxParallelNodePools int32 `json:"maxParallelNodePools,omitempty"`
 }
 

@@ -96,6 +96,7 @@ spec:
                       description: Name specifies the exact name of the NodePool group
                         (defined by label upgrade.huc.0xshift.dev/group on individual
                         NodePools).
+                      minLength: 1
                       type: string
                     startAt:
                       description: |-
@@ -126,8 +127,10 @@ spec:
                     description: |-
                       MaxParallelNodePools specifies the maximum number of NodePools that can be
                       upgraded in parallel within the same priority group.
-                      Defaults to 1.
+                      Defaults to 1 when omitted in JSON. A zero Go value is omitted by omitempty;
+                      an explicit JSON zero or a provided zero policy in direct validation is invalid.
                     format: int32
+                    minimum: 1
                     type: integer
                 type: object
               targetReleaseImage:

@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
@@ -51,14 +52,16 @@ var _ admission.Validator[*HostedClusterUpgrade] = &HostedClusterUpgradeCustomVa
 // ValidateCreate implements admission.Validator so a webhook will be registered for the type
 func (v *HostedClusterUpgradeCustomValidator) ValidateCreate(ctx context.Context, obj *HostedClusterUpgrade) (admission.Warnings, error) {
 	hostedclusterupgradelog.Info("validate create", "name", obj.Name)
+	if err := ValidateUpgradeSpecFields(obj.Spec); err != nil {
+		return nil, err
+	}
 	return nil, v.validateUpgradeSpec(ctx, obj)
 }
 
 // ValidateUpdate implements admission.Validator so a webhook will be registered for the type
 func (v *HostedClusterUpgradeCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *HostedClusterUpgrade) (admission.Warnings, error) {
 	hostedclusterupgradelog.Info("validate update", "name", newObj.Name)
-	// NodePool Group-Level Chronological Consistency Check must always hold
-	if err := validateNodePoolGroupSchedule(newObj.Spec.NodePoolGroups); err != nil {
+	if err := ValidateUpgradeSpecFields(newObj.Spec); err != nil {
 		return nil, err
 	}
 
@@ -75,6 +78,33 @@ func (v *HostedClusterUpgradeCustomValidator) ValidateUpdate(ctx context.Context
 func (v *HostedClusterUpgradeCustomValidator) ValidateDelete(ctx context.Context, obj *HostedClusterUpgrade) (admission.Warnings, error) {
 	hostedclusterupgradelog.Info("validate delete", "name", obj.Name)
 	return nil, nil
+}
+
+// ValidateUpgradeSpecFields validates local rollout, pause, and schedule fields
+// without a cluster lookup. A provided rollout policy must have positive concurrency.
+func ValidateUpgradeSpecFields(spec HostedClusterUpgradeSpec) error {
+	if spec.RolloutPolicy != nil && spec.RolloutPolicy.MaxParallelNodePools <= 0 {
+		return fmt.Errorf("spec.rolloutPolicy.maxParallelNodePools must be at least 1")
+	}
+	names := make(map[string]struct{}, len(spec.NodePoolGroups))
+	for i, group := range spec.NodePoolGroups {
+		if strings.TrimSpace(group.Name) == "" {
+			return fmt.Errorf("spec.nodePoolGroups[%d].name must not be blank", i)
+		}
+		if _, exists := names[group.Name]; exists {
+			return fmt.Errorf("spec.nodePoolGroups[%d].name duplicates group %q", i, group.Name)
+		}
+		names[group.Name] = struct{}{}
+	}
+	if spec.PausedUntil != nil {
+		pause := *spec.PausedUntil
+		if pause != "" && !strings.EqualFold(pause, "true") && !strings.EqualFold(pause, "false") {
+			if _, err := time.Parse(time.RFC3339, pause); err != nil {
+				return fmt.Errorf("spec.pausedUntil must be empty, true, false, or an RFC3339 timestamp: %w", err)
+			}
+		}
+	}
+	return validateNodePoolGroupSchedule(spec.NodePoolGroups)
 }
 
 func validateNodePoolGroupSchedule(groups []NodePoolGroupSpec) error {
@@ -101,7 +131,7 @@ func validateNodePoolGroupSchedule(groups []NodePoolGroupSpec) error {
 func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Context, r *HostedClusterUpgrade) error {
 	cli := v.Client
 	if cli == nil {
-		// Skip validation if client is not initialized (e.g. during standalone unit tests)
+		// Local fields are already validated; only cluster-dependent checks are skipped.
 		return nil
 	}
 
@@ -163,6 +193,5 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 		return err
 	}
 
-	// 4. NodePool Group-Level Chronological Consistency Check
-	return validateNodePoolGroupSchedule(r.Spec.NodePoolGroups)
+	return nil
 }
