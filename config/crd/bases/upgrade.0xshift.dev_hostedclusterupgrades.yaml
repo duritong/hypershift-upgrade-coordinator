@@ -281,6 +281,11 @@ spec:
                       to begin (copied from spec.controlPlane.startAt).
                     format: date-time
                     type: string
+                  startTime:
+                    description: StartTime is when the current release hop was actuated,
+                      cleared after verification.
+                    format: date-time
+                    type: string
                   step:
                     description: Step indicates if we are upgrading to an intermediate
                       version or the final target version.
@@ -354,6 +359,11 @@ spec:
                     scheduledStart:
                       description: ScheduledStart indicates when this NodePool's group
                         is scheduled to begin upgrading (copied from spec.nodePoolGroups[].startAt).
+                      format: date-time
+                      type: string
+                    startTime:
+                      description: StartTime is when this NodePool rollout was actuated,
+                        cleared after completion.
                       format: date-time
                       type: string
                     targetReleaseImage:

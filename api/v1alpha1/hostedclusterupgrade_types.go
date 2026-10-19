@@ -142,6 +142,10 @@ const (
 )
 
 type ControlPlaneUpgradeStatus struct {
+	// StartTime is when the current release hop was actuated, cleared after verification.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
 	// TargetReleaseImage is the release image currently being applied.
 	TargetReleaseImage string `json:"targetReleaseImage,omitempty"`
 
@@ -182,6 +186,10 @@ type ControlPlaneComponentStatus struct {
 }
 
 type NodePoolUpgradeStatus struct {
+	// StartTime is when this NodePool rollout was actuated, cleared after completion.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
 	// Name of the NodePool.
 	Name string `json:"name"`
 
