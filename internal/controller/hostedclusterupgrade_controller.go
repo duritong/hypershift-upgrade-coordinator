@@ -1133,7 +1133,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		for _, np := range groupPoolsMap[group] {
 			hcuStatuses[i].Name = np.name
 			for _, previous := range previousStatuses {
-				if previous.Name == np.name && previous.TargetReleaseImage == targetReleaseImage {
+				if previous.Name == np.name {
 					hcuStatuses[i] = previous
 					break
 				}
@@ -1148,6 +1148,40 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	concurrency := 1
 	if hcu.Spec.RolloutPolicy != nil && hcu.Spec.RolloutPolicy.MaxParallelNodePools > 0 {
 		concurrency = int(hcu.Spec.RolloutPolicy.MaxParallelNodePools)
+	}
+	// A pause stops reconciliation, not the upstream rollout. Reserve slots for
+	// all unfinished work, including older plans and pools outside the active group.
+	reserved := make(map[string]bool)
+	oldWork := make(map[string]bool)
+	activeUpgrades := 0
+	for _, pools := range groupPoolsMap {
+		for _, np := range pools {
+			done := assessments[np.name].complete
+			started := false
+			for _, previous := range previousStatuses {
+				if previous.Name != np.name || previous.Phase == "Completed" {
+					continue
+				}
+				started = previous.StartTime != nil || previous.Phase == "Upgrading"
+				if started && previous.TargetReleaseImage != "" && previous.TargetReleaseImage != targetReleaseImage {
+					a, err := r.assessWorker(ctx, &np.object, hcu.Name, previous.TargetReleaseImage)
+					if err != nil {
+						return false, 0, err
+					}
+					done = a.complete
+					oldWork[np.name] = !done
+				}
+			}
+			image, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
+			if !done && (started || (image == targetReleaseImage && !np.ownedLock)) {
+				reserved[np.name] = true
+				activeUpgrades++
+			}
+		}
+	}
+	hasOldWork := false
+	for _, outstanding := range oldWork {
+		hasOldWork = hasOldWork || outstanding
 	}
 
 	groupUpgradeTriggered := false
@@ -1164,21 +1198,17 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 		groupCompleted := true
 
-		// Count active upgrading pools in this specific group
-		activeUpgrades := 0
-		for _, np := range pools {
-			npSpecRelease, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
-			isDone := assessments[np.name].complete
-
-			if npSpecRelease == targetReleaseImage && np.pausedUntil != "true" && !np.paused && np.pauseErr == nil && !isDone {
-				activeUpgrades++
-			}
-		}
-
 		reqLogger.Info("Processing NodePool group", "group", grpName, "concurrency", concurrency, "activeUpgrades", activeUpgrades, "poolsCount", len(pools))
 
 		for _, np := range pools {
 			startTime := hcuStatuses[idx].StartTime
+			statusTarget := targetReleaseImage
+			if oldWork[np.name] {
+				statusTarget = hcuStatuses[idx].TargetReleaseImage
+			}
+			if !oldWork[np.name] && hcuStatuses[idx].TargetReleaseImage != targetReleaseImage {
+				startTime = nil
+			}
 			assessment := assessments[np.name]
 			replicas, updatedReplicas, readyReplicas := assessment.total, assessment.updated, assessment.ready
 
@@ -1205,6 +1235,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				pauseBlocked = true
 				phase = "Blocked"
 				blockers = append(blockers, np.pauseErr.Error())
+				groupCompleted = false
+			} else if oldWork[np.name] {
+				phase = "Blocked"
+				blockers = append(blockers, "Previous worker target still outstanding; waiting for authoritative completion before changing plans")
 				groupCompleted = false
 			} else if isUpgraded {
 				if changed, err := restoreNodePoolLock(&np.object, hcu); err != nil {
@@ -1250,9 +1284,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 					}
 				} else {
 					// Schedule is open. Trigger Upgrade (subject to concurrency limits or existing in-flight upgrades)
-					isAlreadyUpgrading := npSpecRelease == targetReleaseImage && np.pausedUntil != "true"
+					isAlreadyUpgrading := reserved[np.name] && npSpecRelease == targetReleaseImage
 
-					if isAlreadyUpgrading || activeUpgrades < concurrency {
+					if isAlreadyUpgrading || (!hasOldWork && activeUpgrades < concurrency) {
 						phase = "Upgrading"
 						groupCompleted = false
 
@@ -1271,7 +1305,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 							}
 							if actuated {
 								groupUpgradeTriggered = true
-								activeUpgrades++
+								if !reserved[np.name] {
+									activeUpgrades++
+									reserved[np.name] = true
+								}
 								if startTime == nil {
 									now := metav1.Now()
 									startTime = &now
@@ -1302,7 +1339,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				StartTime:          startTime,
 				Name:               np.name,
 				Group:              grpName,
-				TargetReleaseImage: targetReleaseImage,
+				TargetReleaseImage: statusTarget,
 				ScheduledStart:     schedStart,
 				Phase:              phase,
 				Nodes: upgradev1alpha1.NodeStatusSummary{
