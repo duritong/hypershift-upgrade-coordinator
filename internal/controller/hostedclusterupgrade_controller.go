@@ -252,6 +252,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	if isPaused {
 		reqLogger.Info("Upgrade coordinator is currently paused (Observe-Only Mode)")
+		if hcu.Status.Phase != upgradev1alpha1.PhasePaused {
+			hcu.Status.PhaseBeforePause = hcu.Status.Phase
+		}
 		hcu.Status.Phase = upgradev1alpha1.PhasePaused
 		hcu.Status.Message = "Upgrade coordinator is paused via spec.pausedUntil."
 
@@ -331,6 +334,10 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// 5. Run State Machine transitions
+	if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+		hcu.Status.Phase = hcu.Status.PhaseBeforePause
+		hcu.Status.PhaseBeforePause = ""
+	}
 	if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
 		completedImage := hcu.Status.ControlPlaneStatus.TargetReleaseImage
 		if completedImage == "" {
@@ -340,11 +347,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			hcu.Status = upgradev1alpha1.HostedClusterUpgradeStatus{}
 		}
 	}
-	if hcu.Status.Phase == "" || hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+	if hcu.Status.Phase == "" {
 		hcu.Status.Phase = upgradev1alpha1.PhaseIdle
 		hcu.Status.Message = "Ready to proceed. Initializing upgrade state machine."
-		hcu.Status.StartTime = nil
-		hcu.Status.CompletionTime = nil
 	}
 
 	// Set Start Time once we move past Idle
@@ -764,7 +769,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 		metricNodePoolRolloutRatio.DeletePartialMatch(labels)
 		metricAggregatedNodeRolloutRatio.DeletePartialMatch(labels)
 		livePools := make(map[string]bool)
-		var total, updated int32
+		var total, updated, ready int32
 		for _, np := range pools.Items {
 			cluster, _, _ := unstructured.NestedString(np.Object, "spec", "clusterName")
 			if cluster != hcu.Name {
@@ -783,9 +788,26 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 				}
 			}
 			metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), npVer, targetVer).Set(blocked)
-			replicas, upgraded, _ := GetNodePoolNodeCounts(&np, hcu.Spec.TargetReleaseImage)
+			replicas, upgraded, readyNodes := GetNodePoolNodeCounts(&np, hcu.Spec.TargetReleaseImage)
 			total += replicas
 			updated += upgraded
+			ready += readyNodes
+			if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+				for i := range hcu.Status.NodePoolStatuses {
+					status := &hcu.Status.NodePoolStatuses[i]
+					if status.Name != np.GetName() {
+						continue
+					}
+					status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
+					image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
+					if image == hcu.Spec.TargetReleaseImage && npVer == targetVer && !isNodePoolUpdatingVersion(&np) && upgraded >= replicas && readyNodes >= replicas {
+						status.Phase = "Completed"
+						status.StartTime = nil
+						status.Blockers = nil
+						metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), npVer, targetVer).Set(0)
+					}
+				}
+			}
 			var ratio float64
 			if replicas > 0 {
 				ratio = float64(upgraded) / float64(replicas)
@@ -797,6 +819,9 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			ratio = float64(updated) / float64(total)
 		}
 		metricAggregatedNodeRolloutRatio.WithLabelValues(hcu.Namespace, hcu.Name).Set(ratio)
+		if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+			hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{Total: total, Updated: updated, Ready: ready}
+		}
 		statuses := hcu.Status.NodePoolStatuses[:0]
 		for _, status := range hcu.Status.NodePoolStatuses {
 			if livePools[status.Name] {

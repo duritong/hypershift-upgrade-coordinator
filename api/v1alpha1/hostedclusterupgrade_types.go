@@ -95,6 +95,10 @@ type HostedClusterUpgradeStatus struct {
 	// Phase is the current high-level state of the upgrade state machine.
 	Phase UpgradePhase `json:"phase"`
 
+	// PhaseBeforePause is the state to resume without restarting active rollouts.
+	// +optional
+	PhaseBeforePause UpgradePhase `json:"phaseBeforePause,omitempty"`
+
 	// Message describes the current step, pending schedules, or active blocker details.
 	// e.g. "Control Plane upgrade verified. NodePool 'infra-pool' is waiting for its scheduled window (opens in 14 hours)."
 	Message string `json:"message,omitempty"`

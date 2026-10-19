@@ -387,6 +387,10 @@ spec:
                 description: Phase is the current high-level state of the upgrade
                   state machine.
                 type: string
+              phaseBeforePause:
+                description: PhaseBeforePause is the state to resume without restarting
+                  active rollouts.
+                type: string
               startTime:
                 description: StartTime is the time when the upgrade actually commenced.
                 format: date-time
