@@ -129,3 +129,54 @@ func TestWorkerKnownRolloutWithExternalSpecChangeBlocksNewWork(t *testing.T) {
 		t.Fatal("lost recorded coordinator target")
 	}
 }
+
+func TestOwnedLockCanHoldPendingConfiguration(t *testing.T) {
+	for _, propagated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "delegated"}[propagated], func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+			hcu.UID = "upgrade"
+			np := regressionNP("workers", "")
+			np.SetGeneration(3)
+			md := readyWorkerFixture(np, regressionImage("4.20.0"))
+			c := &regressionClient{objects: []client.Object{np, md}}
+			addReadyCP(c, regressionHC("4.21.0"))
+			r := &HostedClusterUpgradeReconciler{Client: c}
+			if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(np), np); err != nil {
+				t.Fatal(err)
+			}
+			np.SetGeneration(4)
+			conditions, _, _ := unstructured.NestedSlice(np.Object, "status", "conditions")
+			for _, item := range conditions {
+				condition := item.(map[string]interface{})
+				if condition["type"] == "UpdatingConfig" {
+					condition["status"] = "True"
+				}
+			}
+			_ = unstructured.SetNestedSlice(np.Object, conditions, "status", "conditions")
+			if err := c.store(np); err != nil {
+				t.Fatal(err)
+			}
+			if propagated {
+				_ = unstructured.SetNestedField(md.Object, "user-data-workers-new-config", "spec", "template", "spec", "bootstrap", "dataSecretName")
+				if err := c.store(md); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := r.WorkerPrerequisite(context.Background(), hcu)
+			if (err != nil) != propagated {
+				t.Fatalf("pending/delegated classification wrong: propagated=%t err=%v", propagated, err)
+			}
+			if !propagated {
+				if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
+					t.Fatal(err)
+				}
+				if hcu.Status.NodePoolStatuses[0].Phase != "Upgrading" {
+					t.Fatalf("own lock stranded pending config: %+v", hcu.Status.NodePoolStatuses)
+				}
+			}
+		})
+	}
+}

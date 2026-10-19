@@ -43,6 +43,13 @@ spec change invalidates this proof. Older locks without this proof fail closed
 until fresh upstream evidence establishes quiescence. UID ownership, original
 user pauses, and finalizer restoration remain authoritative.
 
+Locks also snapshot the completed worker configuration hash. A ConfigMap change
+can set `UpdatingConfig=True` while the pause still prevents delegation. This
+pending request does not strand the owned lock: quiescence may ignore that one
+desired-state condition only while the saved generation/configuration and actual
+CAPI bootstrap hash, observed generation, healthy population and completion all
+still agree. A request already propagated to CAPI remains outstanding work.
+
 During worker reconciliation, newly enrolled quiescent pools are locked before
 any pool is released in group order. External or unproven rollouts block new work
 regardless of group and reserve concurrency even if independently paused.

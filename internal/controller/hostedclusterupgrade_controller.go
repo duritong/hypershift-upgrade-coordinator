@@ -870,6 +870,7 @@ func restoreNodePoolLock(np *unstructured.Unstructured, hcu *upgradev1alpha1.Hos
 	delete(annotations, workerLockOwner)
 	delete(annotations, workerLockOriginal)
 	delete(annotations, workerLockGeneration)
+	delete(annotations, workerLockConfig)
 	np.SetAnnotations(annotations)
 	return true, nil
 }

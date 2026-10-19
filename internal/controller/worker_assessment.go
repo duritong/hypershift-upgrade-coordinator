@@ -21,6 +21,7 @@ const workerPoolAnnotation = "hypershift.openshift.io/nodePool"
 const workerCurrentConfig = "hypershift.openshift.io/nodePoolCurrentConfigVersion"
 const workerTargetConfig = "hypershift.openshift.io/nodePoolTargetConfigVersion"
 const workerLockGeneration = "upgrade.huc.0xshift.dev/worker-lock-quiescent-generation"
+const workerLockConfig = "upgrade.huc.0xshift.dev/worker-lock-quiescent-config"
 
 // WorkerControlPlaneNamespace matches HyperShift's namespace naming, not its raw HC name.
 func WorkerControlPlaneNamespace(namespace, name string) string {
@@ -62,6 +63,20 @@ func (r *HostedClusterUpgradeReconciler) assessWorkerQuiescence(ctx context.Cont
 	baseline, err := strconv.ParseInt(np.GetAnnotations()[workerLockGeneration], 10, 64)
 	if owned && pause == "true" && err == nil && np.GetGeneration() >= baseline && np.GetGeneration() <= baseline+1 {
 		observed.SetGeneration(baseline)
+		// A held ConfigMap change is desired work, not necessarily delegated work.
+		// Ignore it only while the verified config snapshot is unchanged; assessWorker
+		// still proves the actual CAPI generation, bootstrap hash and population.
+		snapshot := np.GetAnnotations()[workerLockConfig]
+		if snapshot != "" && snapshot == np.GetAnnotations()[workerCurrentConfig] {
+			conditions, _, _ := unstructured.NestedSlice(observed.Object, "status", "conditions")
+			for _, item := range conditions {
+				condition, _ := item.(map[string]interface{})
+				if condition["type"] == "UpdatingConfig" {
+					condition["status"] = "False"
+				}
+			}
+			_ = unstructured.SetNestedSlice(observed.Object, conditions, "status", "conditions")
+		}
 	}
 	image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
 	return r.assessWorker(ctx, observed, hcu.Name, image)
@@ -106,8 +121,10 @@ func (r *HostedClusterUpgradeReconciler) acquireWorkerLock(ctx context.Context, 
 	annotations[workerLockOwner] = string(hcu.UID)
 	annotations[workerLockOriginal] = string(original)
 	delete(annotations, workerLockGeneration)
+	delete(annotations, workerLockConfig)
 	if a.complete {
 		annotations[workerLockGeneration] = strconv.FormatInt(np.GetGeneration(), 10)
+		annotations[workerLockConfig] = np.GetAnnotations()[workerCurrentConfig]
 	}
 	np.SetAnnotations(annotations)
 	_ = unstructured.SetNestedField(np.Object, "true", "spec", "pausedUntil")
