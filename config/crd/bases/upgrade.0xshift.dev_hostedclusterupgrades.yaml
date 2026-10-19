@@ -390,6 +390,10 @@ spec:
                 description: Phase is the current high-level state of the upgrade
                   state machine.
                 type: string
+              phaseBeforeBlock:
+                description: PhaseBeforeBlock is the failed step to retry without
+                  restarting earlier work.
+                type: string
               phaseBeforePause:
                 description: PhaseBeforePause is the state to resume without restarting
                   active rollouts.

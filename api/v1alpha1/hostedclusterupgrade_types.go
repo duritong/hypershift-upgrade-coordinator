@@ -102,6 +102,10 @@ type HostedClusterUpgradeStatus struct {
 	// +optional
 	PhaseBeforePause UpgradePhase `json:"phaseBeforePause,omitempty"`
 
+	// PhaseBeforeBlock is the failed step to retry without restarting earlier work.
+	// +optional
+	PhaseBeforeBlock UpgradePhase `json:"phaseBeforeBlock,omitempty"`
+
 	// Message describes the current step, pending schedules, or active blocker details.
 	// e.g. "Control Plane upgrade verified. NodePool 'infra-pool' is waiting for its scheduled window (opens in 14 hours)."
 	Message string `json:"message,omitempty"`

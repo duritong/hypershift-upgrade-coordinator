@@ -277,7 +277,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	isPaused, pausedRequeueAfter, err := checkPausedState(hcu.Spec.PausedUntil)
 	if err != nil {
 		reqLogger.Error(err, "Failed to parse spec.pausedUntil")
-		hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+		markUpgradeBlocked(hcu)
 		hcu.Status.Message = fmt.Errorf("invalid spec.pausedUntil format: %v", err).Error()
 
 		// Record metric failure
@@ -286,7 +286,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		r.updateConditions(hcu)
 
 		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-			_ = r.Status().Update(ctx, hcu)
+			if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
 		}
 		return ctrl.Result{}, err
 	}
@@ -332,7 +334,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	err = r.Get(ctx, client.ObjectKey{Namespace: hcu.Namespace, Name: hcu.Name}, uHC)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Target HostedCluster '%s' does not exist inside namespace '%s'", hcu.Name, hcu.Namespace)
 
 			// Record metric failure
@@ -341,9 +343,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 			r.updateConditions(hcu)
 			if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-				_ = r.Status().Update(ctx, hcu)
+				if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -351,10 +355,14 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	// Admission may have been bypassed, and the cluster may have changed since
 	// admission. Recheck the remaining path before any resource mutations.
 	if err := upgradev1alpha1.RejectControlPlaneReleaseOverride(uHC); err != nil {
-		hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+		markUpgradeBlocked(hcu)
 		hcu.Status.Message = err.Error()
 		r.updateConditions(hcu)
-		return ctrl.Result{}, r.Status().Update(ctx, hcu)
+		r.exposePhaseMetrics(ctx, hcu, uHC)
+		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if installing, _ := r.checkClusterInstallingAndHealth(uHC); !installing {
 		currentRelease, currentVersion := GetHostedClusterCurrentRelease(uHC)
@@ -362,19 +370,19 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			currentRelease = currentVersion
 		}
 		if err := upgradev1alpha1.ValidateUpgradePath(currentRelease, hcu.Spec.TargetReleaseImage, hcu.Spec.IntermediateReleaseImage, true); err != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Upgrade version safety gate blocked: %v", err)
 			r.updateConditions(hcu)
 			r.exposePhaseMetrics(ctx, hcu, uHC)
 			if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-				return ctrl.Result{}, r.Status().Update(ctx, hcu)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 
 	if err := r.verifyReleasePayloads(ctx, hcu, uHC); err != nil {
-		hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+		markUpgradeBlocked(hcu)
 		hcu.Status.Message = fmt.Sprintf("Release payload safety gate blocked: %v", err)
 		r.updateConditions(hcu)
 		r.exposePhaseMetrics(ctx, hcu, uHC)
@@ -398,6 +406,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		hcu.Status.Phase = hcu.Status.PhaseBeforePause
 		hcu.Status.PhaseBeforePause = ""
 	}
+	retryBlockedStep(hcu)
 	if hcu.Status.Phase == upgradev1alpha1.PhaseUpgradingNodePools && hcu.Status.ControlPlaneStatus.TargetReleaseImage != "" && hcu.Status.ControlPlaneStatus.TargetReleaseImage != hcu.Spec.TargetReleaseImage {
 		// A changed plan must verify its new control plane before touching workers.
 		hcu.Status.Phase = upgradev1alpha1.PhasePreflightChecks
@@ -433,7 +442,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		isInstalling, err := r.checkClusterInstallingAndHealth(uHC)
 		if err != nil {
 			reqLogger.Error(err, "PreflightChecks failed")
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Preflight Checks Blocked: %v", err)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "PreflightBlocked").Inc()
 			break
@@ -450,13 +459,13 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		desired, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(baseline, desired) {
 			if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
-				hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+				markUpgradeBlocked(hcu)
 				hcu.Status.Message = err.Error()
 				break
 			}
 			next, planErr := plannedControlPlaneRelease(uHC, hcu)
 			if planErr != nil {
-				hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+				markUpgradeBlocked(hcu)
 				hcu.Status.Message = planErr.Error()
 				break
 			}
@@ -486,7 +495,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	case upgradev1alpha1.PhaseInstalling:
 		isInstalling, err := r.checkClusterInstallingAndHealth(uHC)
 		if err != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Installation failed or cluster became unhealthy: %v", err)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "InstallationUnhealthy").Inc()
 			break
@@ -509,7 +518,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 				r.exposePhaseMetrics(ctx, hcu, uHC)
 				r.updateConditions(hcu)
 				if !reflect.DeepEqual(originalStatus, &hcu.Status) {
-					_ = r.Status().Update(ctx, hcu)
+					if statusErr := r.Status().Update(ctx, hcu); statusErr != nil {
+						return ctrl.Result{}, statusErr
+					}
 				}
 				// Cap requeue duration to 5 minutes so status messages update periodically
 				if requeueDur > 5*time.Minute {
@@ -526,7 +537,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		// Pre-Step Health Re-verification check
 		isInstalling, err := r.checkClusterInstallingAndHealth(uHC)
 		if err != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Pre-Step Health Gate Blocked CP Upgrade: %v", err)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "PreStepCPHealthBlocked").Inc()
 			break
@@ -541,7 +552,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		targetVer, _ := upgradev1alpha1.ExtractVersion(hcu.Spec.TargetReleaseImage)
 		nextReleaseImage, planErr := plannedControlPlaneRelease(uHC, hcu)
 		if planErr != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = planErr.Error()
 			break
 		}
@@ -565,7 +576,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			break
 		}
 		if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = err.Error()
 			break
 		}
@@ -592,7 +603,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		reqLogger.Info("Applying version change on HostedCluster spec", "step", stepLabel, "image", nextReleaseImage)
 		err = unstructured.SetNestedField(uHC.Object, nextReleaseImage, "spec", "release", "image")
 		if err != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Failed to configure release image on HostedCluster: %v", err)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, "HostedClusterSpecUpdateFailed").Inc()
 			break
@@ -644,7 +655,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		// Re-verify cluster health
 		isInstalling, healthErr := r.checkClusterInstallingAndHealth(uHC)
 		if healthErr != nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("Control Plane Rollout Blocked: %v", healthErr)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", expectedVer, "ControlPlaneRolloutFailed").Inc()
 			break
@@ -685,7 +696,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		requeue, dur, err := r.reconcileNodePools(ctx, hcu, uHC)
 		if err != nil {
 			reqLogger.Error(err, "Failed to reconcile NodePools")
-			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			markUpgradeBlocked(hcu)
 			hcu.Status.Message = fmt.Sprintf("NodePool upgrade blocked: %v", err)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "NodePoolRolloutFailed").Inc()
 			break
@@ -702,13 +713,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			hcu.Status.CompletionTime = &now
 		}
 
-	case upgradev1alpha1.PhaseBlocked:
-		// SRE recovery gate
-		_, err := r.checkClusterInstallingAndHealth(uHC)
-		if err == nil {
-			hcu.Status.Phase = upgradev1alpha1.PhaseIdle
-			hcu.Status.Message = "Cluster has recovered health. Restarting state machine."
-		}
+	}
+	if hcu.Status.Phase == upgradev1alpha1.PhaseBlocked {
+		stateRequeueAfter = 30 * time.Second
+	} else {
+		hcu.Status.PhaseBeforeBlock = ""
 	}
 
 	// Update GitOps standard conditions
