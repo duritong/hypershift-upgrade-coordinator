@@ -22,7 +22,23 @@ spec:
         severity: warning
       annotations:
         summary: "Hosted Cluster Upgrade NodePool is Blocked"
-        description: "The NodePool '{{ $labels.nodepool }}' in HostedClusterUpgrade '{{ $labels.name }}' has stalled and is blocked by PDBs or failed drains."
+        description: "The NodePool '{{ $labels.nodepool }}' in HostedClusterUpgrade '{{ $labels.name }}' reports an assessment or orchestration blocker. Inspect NodePool status; this is not attribution of HCCO drain logs."
+    - alert: HypershiftUpgradeDrainObservations
+      expr: hypershift_upgrade_drain_observations > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Cluster-level drain or eviction log observations"
+        description: "HostedClusterUpgrade '{{ $labels.name }}' has recent best-effort HCCO drain hints. Inspect status.drainDiagnostics and guest resources; NodePool and PDB ownership are not established."
+    - alert: HypershiftUpgradeDrainDiagnosticsUnavailable
+      expr: hypershift_upgrade_drain_diagnostics_available == 0
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Drain log diagnostics unavailable"
+        description: "HostedClusterUpgrade '{{ $labels.name }}' cannot collect best-effort HCCO diagnostics. Rollout actions continue; missing logs do not establish drain health."
     - alert: HypershiftUpgradeStepDurationLong
       expr: hypershift_upgrade_step_duration_seconds > 14400
       for: 10m

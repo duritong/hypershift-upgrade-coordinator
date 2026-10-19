@@ -399,7 +399,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
 			// Setup Mock HCCO Logs
-			testLogScraper.MockLogs = "2026-08-12T12:00:00Z failed to drain node pool-b-node-1: cannot evict pod db-pod due to PDB db-pdb"
+			testLogScraper.MockLogs = time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano) + ` {"msg":"failed to drain node","Node":{"name":"pool-b-node-1"},"error":"drain failed: failed to drain node pool-b-node-1: global timeout reached"}`
 
 			// 1. Create target HostedCluster already at target version to bypass CP upgrade step
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.22.2"))
@@ -544,17 +544,20 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				return pUntil
 			}, time.Second*2, interval).Should(Equal("true"))
 
-			// 7. Verify that HCCO log-scraping successfully parses the mock logs and populates the status blockers!
+			// 7. Cluster observations must not be attributed to either active pool.
 			Eventually(func() []string {
 				fetched := &upgradev1alpha1.HostedClusterUpgrade{}
 				_ = k8sClient.Get(ctx, hcuKey, fetched)
-				for _, s := range fetched.Status.NodePoolStatuses {
-					if s.Name == "pool-b" {
-						return s.Blockers
-					}
+				if fetched.Status.DrainDiagnostics == nil {
+					return nil
 				}
-				return nil
-			}, timeout, interval).Should(ContainElement(ContainSubstring("cannot evict pod db-pod due to PDB db-pdb")))
+				return fetched.Status.DrainDiagnostics.Messages
+			}, timeout, interval).Should(ContainElement(ContainSubstring("failed to drain node pool-b-node-1")))
+			fetched := &upgradev1alpha1.HostedClusterUpgrade{}
+			Expect(k8sClient.Get(ctx, hcuKey, fetched)).To(Succeed())
+			for _, s := range fetched.Status.NodePoolStatuses {
+				Expect(s.Blockers).NotTo(ContainElement(ContainSubstring("pool-b-node-1")))
+			}
 
 			// 8. Simulate compute group (pool-b and pool-c) completes its upgrade
 			fetchedNPB := &unstructured.Unstructured{}
@@ -1373,33 +1376,16 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("kubernetes client is nil"))
 
-			// 2. Test scrapeHCCOLogsForDrains deduplication and bounding to 10 items
+			// 2. Timestamped generic HCCO drain failures are cluster observations.
 			r := &HostedClusterUpgradeReconciler{
 				LogScraper: &DefaultMockLogScraper{
-					MockLogs: `failed to drain node worker-1
-cannot evict pod app-1 due to PDB app-pdb
-cannot evict pod app-1 due to PDB app-pdb
-cannot evict pod app-2 due to PDB app-pdb
-cannot evict pod app-3 due to PDB app-pdb
-cannot evict pod app-4 due to PDB app-pdb
-cannot evict pod app-5 due to PDB app-pdb
-cannot evict pod app-6 due to PDB app-pdb
-cannot evict pod app-7 due to PDB app-pdb
-cannot evict pod app-8 due to PDB app-pdb
-cannot evict pod app-9 due to PDB app-pdb
-cannot evict pod app-10 due to PDB app-pdb
-cannot evict pod app-11 due to PDB app-pdb
-cannot evict pod app-12 due to PDB app-pdb`,
+					MockLogs: `2026-08-12T12:00:00Z {"msg":"failed to drain node","Node":{"name":"worker-1"},"error":"drain failed: timeout"}`,
 				},
 			}
 
-			blockers := r.scrapeHCCOLogsForDrains(ctx, "clusters", "my-cluster", "workers")
-			// Must be capped at exactly 10 items (not 14!)
-			Expect(len(blockers)).To(Equal(10))
-			// Must contain deduplicated items
-			Expect(blockers[0]).To(Equal("failed to drain node worker-1"))
-			Expect(blockers[1]).To(Equal("cannot evict pod app-1 due to PDB app-pdb"))
-			Expect(blockers[2]).To(Equal("cannot evict pod app-2 due to PDB app-pdb"))
+			d := r.scrapeHCCOLogsForDrains(ctx, "clusters", "my-cluster", time.Time{})
+			Expect(d.Available).To(BeTrue())
+			Expect(d.Messages).To(Equal([]string{"node worker-1: failed to drain node: drain failed: timeout"}))
 		})
 	})
 })

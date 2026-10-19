@@ -119,13 +119,7 @@ Once the control plane has been 100% verified on the target version, the coordin
   - **Parallelism Constraints:** NodePools within the same active group whose scheduled times are open or empty can upgrade in parallel, limited by `.spec.rolloutPolicy.maxParallelNodePools` (defaulting to 1). Subsequent groups remain in `"WaitingForGroup"` status until the current group finishes completely.
 - **Log-Scraping Draining Observation:**
   * **The Challenge:** Upstream HyperShift's HCCO node drainer controller (`hosted-cluster-config-operator/controllers/drainer/drainer.go`) **does not emit Kubernetes Events** during node drains or evictions. It relies strictly on internal container logging.
-  * **The Solution:** To monitor draining and surface stuck nodes, the coordinator implements a targeted **log-scraping worker**:
-    1. When a NodePool rollout begins and a node is marked for draining, the coordinator initiates a log-streaming channel to the `hosted-cluster-config-operator` pod in the control plane namespace `<hc_namespace>-<cluster_name>`.
-    2. It scrapes logs searching for HCCO patterns:
-       - `"Performing drain on node <node_name>"` (logs drain start).
-       - `"failed to drain node <node_name>"` (logs retry requeues).
-       - Pod Disruption Budgets (PDB) or Pod eviction failure warnings (e.g., `"cannot evict pod <pod_name> due to PDB <pdb_name>"`).
-    3. The coordinator parses these lines and immediately surfaces any blocked drainers and the specific blocking pods in `status.nodePoolStatuses[].blockers` and raises `hypershift_upgrade_nodepool_blocked` metric to `1`.
+  * **The Solution:** After worker rollout actions, a bounded best-effort request fetches HCCO logs once per cluster reconciliation. Timestamped generic `failed to drain node` messages and kubectl `error when evicting pods/` retries become cluster-level `status.drainDiagnostics.messages`, never attributed NodePool blockers. Later `Drain succeeded on node` messages clear earlier failures for the same identified node. Collection availability is separate from absence of observations; logs do not prove exact PDB ownership. Separate cluster-level availability and observation gauges support alerts. See the [user guide](user-guide.md#troubleshooting-blocked-node-drains) for bounds and limitations.
 
 ---
 
@@ -168,5 +162,5 @@ The operator exposes a Prometheus metric endpoint (`/metrics`) to facilitate das
 | `hypershift_upgrade_step_duration_seconds` | Gauge | `namespace`, `name`, `step`, `current_version`, `target_version` | Active elapsed duration for a specific step (e.g., `step="ControlPlane"`, `step="NodePool-worker-1"`). Resets when the individual step completes. | Alert if a specific step exceeds its targeted performance threshold (e.g. CP > 2h, NodePool rollout > 3h). |
 | `hypershift_upgrade_failed_total` | Counter | `namespace`, `name`, `current_version`, `target_version`, `reason` | Total number of retries or failures encountered during the upgrade. | Alert if rate of failures is high (e.g., rate > 0.1/min). |
 | `hypershift_upgrade_controlplane_component_ready` | Gauge | `namespace`, `name`, `component` | Availability and completeness state of individual components (0=Unavailable, 1=Available/Rolling, 2=Available/Complete). | Alert if a critical component (e.g., `etcd`) remains at `0` or `1` for more than 45 minutes during an upgrade. |
-| `hypershift_upgrade_nodepool_blocked` | Gauge | `namespace`, `name`, `nodepool`, `current_version`, `target_version` | Boolean flag (1=Blocked, 0=Active/Complete) indicating if a NodePool rollout has stalled, with version details. | Immediate high-severity SRE pager alert when `1` (usually due to a stuck node drain or PDB blocker). |
+| `hypershift_upgrade_nodepool_blocked` | Gauge | `namespace`, `name`, `nodepool`, `current_version`, `target_version` | Pool assessment/orchestration blocker, not attributed HCCO log hints. | Warning after 30 minutes; inspect pool status. |
 | `hypershift_upgrade_nodepool_rollout_ratio` | Gauge | `namespace`, `name`, `nodepool` | Ratio of nodes running the target version and ready (`updatedReplicas / totalReplicas`). | Visualizing rollout curves in SRE Grafana dashboards. |

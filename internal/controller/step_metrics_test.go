@@ -347,7 +347,7 @@ func TestStaleUpgradeGaugesAndDeletion(t *testing.T) {
 	counter := metricFailedTotal.WithLabelValues("clusters", "example", "", "", "step-metrics-test")
 	counter.Inc()
 	t.Cleanup(func() { metricFailedTotal.DeleteLabelValues("clusters", "example", "", "", "step-metrics-test") })
-	gauges := []*prometheus.GaugeVec{metricPhase, metricDuration, metricStepDuration, metricComponentReady, metricNodePoolBlocked, metricNodePoolRolloutRatio, metricAggregatedNodeRolloutRatio}
+	gauges := []*prometheus.GaugeVec{metricPhase, metricDuration, metricStepDuration, metricComponentReady, metricNodePoolBlocked, metricNodePoolRolloutRatio, metricAggregatedNodeRolloutRatio, metricDrainAvailable, metricDrainObservations}
 	for _, gauge := range gauges {
 		labels := prometheus.Labels{"namespace": "other", "name": "cluster"}
 		// Seed every gauge, including vectors that currently have no series.

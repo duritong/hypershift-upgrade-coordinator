@@ -86,7 +86,7 @@ func (s *namespaceLogScraper) GetHCCOLogs(_ context.Context, namespace, _ string
 func TestDottedClusterLogNamespace(t *testing.T) {
 	s := &namespaceLogScraper{}
 	r := &HostedClusterUpgradeReconciler{LogScraper: s}
-	r.scrapeHCCOLogsForDrains(context.Background(), "team-prod", "api.east", "workers")
+	r.scrapeHCCOLogsForDrains(context.Background(), "team-prod", "api.east", time.Now())
 	if s.namespace != "team-prod-api-east" {
 		t.Fatalf("log namespace = %q", s.namespace)
 	}

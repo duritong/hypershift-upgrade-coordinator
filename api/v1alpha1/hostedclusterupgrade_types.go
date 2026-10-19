@@ -132,12 +132,27 @@ type HostedClusterUpgradeStatus struct {
 	// NodePoolStatus details the progress of each associated NodePool.
 	NodePoolStatuses []NodePoolUpgradeStatus `json:"nodePoolStatuses,omitempty"`
 
+	// DrainDiagnostics contains best-effort cluster-level HCCO log observations,
+	// not attributed NodePool blockers or proof of PDB ownership.
+	// +optional
+	DrainDiagnostics *DrainDiagnosticsStatus `json:"drainDiagnostics,omitempty"`
+
 	// AggregatedNodeStatus summarizes overall node upgrades progress across all associated NodePools.
 	// +optional
 	AggregatedNodeStatus NodeStatusSummary `json:"aggregatedNodeStatus,omitempty"`
 }
 
 type UpgradePhase string
+
+type DrainDiagnosticsStatus struct {
+	// Available means log collection succeeded, not that all drains are healthy.
+	Available bool `json:"available"`
+	// Reason is a stable collection outcome, separate from rollout health.
+	Reason string `json:"reason"`
+	// Messages are recent cluster-level drain/eviction hints, newest first.
+	// +kubebuilder:validation:MaxItems=10
+	Messages []string `json:"messages,omitempty"`
+}
 
 const (
 	PhaseIdle                  UpgradePhase = "Idle"
@@ -220,7 +235,7 @@ type NodePoolUpgradeStatus struct {
 	// Nodes contains node-level metrics for the NodePool rollout.
 	Nodes NodeStatusSummary `json:"nodes"`
 
-	// Blockers lists detailed messages if the NodePool upgrade is stuck (e.g., node draining blocked).
+	// Blockers lists authoritative NodePool assessment and orchestration blockers.
 	Blockers []string `json:"blockers,omitempty"`
 }
 

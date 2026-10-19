@@ -136,6 +136,14 @@ func (d *DefaultMockLogScraper) GetHCCOLogs(ctx context.Context, namespace, podN
 
 // Prometheus SRE metrics definitions
 var (
+	metricDrainAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hypershift_upgrade_drain_diagnostics_available",
+		Help: "Whether best-effort cluster-level HCCO log collection succeeded; not drain health.",
+	}, []string{"namespace", "name"})
+	metricDrainObservations = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hypershift_upgrade_drain_observations",
+		Help: "Recent cluster-level drain/eviction log hints, not attributed NodePool blockers.",
+	}, []string{"namespace", "name"})
 	metricPhase = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "hypershift_upgrade_phase",
@@ -197,6 +205,7 @@ var (
 func init() {
 	// Register Prometheus SRE metrics on the controller-runtime metrics registry
 	metrics.Registry.MustRegister(
+		metricDrainAvailable, metricDrainObservations,
 		metricPhase,
 		metricDuration,
 		metricStepDuration,
@@ -891,6 +900,7 @@ func clearUpgradeGauges(namespace, name string) {
 	for _, gauge := range []*prometheus.GaugeVec{
 		metricPhase, metricDuration, metricStepDuration, metricComponentReady,
 		metricNodePoolBlocked, metricNodePoolRolloutRatio, metricAggregatedNodeRolloutRatio,
+		metricDrainAvailable, metricDrainObservations,
 	} {
 		gauge.DeletePartialMatch(labels)
 	}
@@ -898,6 +908,7 @@ func clearUpgradeGauges(namespace, name string) {
 
 // exposePhaseMetrics populates core SRE gauge values from the resulting status.
 func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, uHC *unstructured.Unstructured) {
+	exposeDrainMetrics(hcu)
 	labels := prometheus.Labels{"namespace": hcu.Namespace, "name": hcu.Name}
 	for _, gauge := range []*prometheus.GaugeVec{metricPhase, metricDuration, metricStepDuration} {
 		gauge.DeletePartialMatch(labels)
@@ -1047,6 +1058,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	reqLogger.Info("Retrieved associated NodePools", "totalCount", len(clusterNodePools))
 
 	if len(clusterNodePools) == 0 {
+		hcu.Status.DrainDiagnostics = nil
 		if err := r.verifyControlPlane(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage); err != nil {
 			hcu.Status.Message = err.Error()
 			return true, 10 * time.Second, nil
@@ -1446,15 +1458,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 	hcu.Status.NodePoolStatuses = hcuStatuses
 	// Diagnostics are best-effort and run only after rollout actions, once per cluster.
-	var drainBlockers []string
-	for i := range hcuStatuses {
-		if hcuStatuses[i].Phase == "Upgrading" {
-			if drainBlockers == nil {
-				drainBlockers = r.scrapeHCCOLogsForDrains(ctx, hcu.Namespace, hcu.Name, "")
-			}
-			hcuStatuses[i].Blockers = append(hcuStatuses[i].Blockers, drainBlockers...)
-		}
-	}
+	r.refreshDrainDiagnostics(ctx, hcu)
 
 	if allCompleted {
 		// All groups successfully verified and upgraded! Transition state machine to Completed.
@@ -1481,43 +1485,6 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 
 	return false, 0, nil
-}
-
-// scrapeHCCOLogsForDrains scrapes HCCO logs to detect stuck node drains (utilizes injectable log scrapers).
-func (r *HostedClusterUpgradeReconciler) scrapeHCCOLogsForDrains(ctx context.Context, namespace, clusterName, nodePoolName string) []string {
-	blockers := []string{}
-	if r.LogScraper == nil {
-		return blockers
-	}
-
-	// HCCO is located inside the control plane namespace: <hc_namespace>-<cluster_name>
-	cpNamespace := WorkerControlPlaneNamespace(namespace, clusterName)
-
-	// Retrieve logs via our mock/injectable scraper interface
-	logsBlock, err := r.LogScraper.GetHCCOLogs(ctx, cpNamespace, "hosted-cluster-config-operator", time.Now().Add(-drainLogLookback))
-	if err != nil {
-		return blockers
-	}
-
-	seen := make(map[string]bool)
-	lines := strings.Split(logsBlock, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if (strings.Contains(trimmed, "cannot evict pod") && strings.Contains(trimmed, "due to PDB")) || strings.Contains(trimmed, "failed to drain node") {
-			if !seen[trimmed] {
-				seen[trimmed] = true
-				blockers = append(blockers, trimmed)
-				if len(blockers) >= 10 {
-					break
-				}
-			}
-		}
-	}
-
-	return blockers
 }
 
 // checkPausedState evaluates if the coordinator is paused (indefinitely or timed).

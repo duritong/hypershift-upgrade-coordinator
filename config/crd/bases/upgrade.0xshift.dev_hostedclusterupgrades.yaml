@@ -308,6 +308,30 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              drainDiagnostics:
+                description: |-
+                  DrainDiagnostics contains best-effort cluster-level HCCO log observations,
+                  not attributed NodePool blockers or proof of PDB ownership.
+                properties:
+                  available:
+                    description: Available means log collection succeeded, not that
+                      all drains are healthy.
+                    type: boolean
+                  messages:
+                    description: Messages are recent cluster-level drain/eviction
+                      hints, newest first.
+                    items:
+                      type: string
+                    maxItems: 10
+                    type: array
+                  reason:
+                    description: Reason is a stable collection outcome, separate from
+                      rollout health.
+                    type: string
+                required:
+                - available
+                - reason
+                type: object
               message:
                 description: |-
                   Message describes the current step, pending schedules, or active blocker details.
@@ -319,8 +343,8 @@ spec:
                 items:
                   properties:
                     blockers:
-                      description: Blockers lists detailed messages if the NodePool
-                        upgrade is stuck (e.g., node draining blocked).
+                      description: Blockers lists authoritative NodePool assessment
+                        and orchestration blockers.
                       items:
                         type: string
                       type: array

@@ -13,7 +13,7 @@ The HyperShift Upgrade Coordinator is an Kubernetes operator designed to automat
 *   **Staged Multi-Step Hops**: Supports upgrading via intermediate versions (e.g. EUS-to-EUS jumps) automatically.
 *   **Scheduled Phases**: Provides separate earliest-start gates for the control plane and worker groups, not bounded maintenance windows.
 *   **Group serialization**: Upgrades NodePools in `spec.nodePoolGroups` order using the label `upgrade.huc.0xshift.dev/group`.
-*   **Live SRE Diagnostics**: Scrapes HCCO pod logs to extract PDBs and node drain blockages in real-time.
+*   **Best-Effort Drain Diagnostics**: Collects bounded HCCO logs for cluster-level drain/eviction hints, separately reporting unavailable collection. Logs do not establish NodePool or exact PDB ownership.
 
 ---
 
@@ -244,22 +244,22 @@ and pool concurrency limits. These are operational requirements, not exclusive
 ownership enforced by admission. See the [GitOps ownership contract](gitops.md#4-ownership-contract).
 
 ### Troubleshooting Blocked Node Drains
-If a worker NodePool rollout stalls, the coordinator automatically scrapes the logs of the `hosted-cluster-config-operator` (HCCO) inside the target control plane namespace. 
+During outstanding worker rollouts, the coordinator fetches HCCO logs once per worker reconciliation, after rollout actions. Inspect `oc get hostedclusterupgrade production-cluster-01 -n clusters -o yaml`:
 
-1.  **Check CR status**: View detailed blocker reasons, stuck PDB names, or eviction errors directly inside the status:
-    ```bash
-    oc get hostedclusterupgrade production-cluster-01 -n clusters -o yaml
-    ```
-2.  **Inspect the NodePool blockers section**:
-    ```yaml
-    status:
-      nodePoolStatuses:
-        - name: workers-us-east-1a
-          phase: Upgrading
-          blockers:
-            - "failed to drain node 'ip-10-0-142-3.ec2.internal': cannot evict pod 'my-app-pod' in namespace 'app' due to PDB 'my-app-pdb'"
-    ```
-3.  **Resolve blockages**: Temporarily scale down or bypass the offending PDBs/deployments inside the guest cluster to allow the node drainer to proceed smoothly.
+```yaml
+status:
+  drainDiagnostics:
+    available: true
+    reason: Collected
+    messages:
+      - 'node worker-1: failed to drain node: drain failed: global timeout reached'
+```
+
+These are **cluster-level observations**, not attributed NodePool blockers. Eviction logs may hint at disruption budgets but do not prove which PDB owns a blockage. Investigate the guest node, pods, and matching PDB selectors before making workload or availability-policy changes.
+
+`available: false` with `CollectionFailed` or `ScraperNotConfigured` means diagnostics are unavailable, not that drains are healthy. Failure does not stop rollout actions. Successful collection with no messages only means no matching unresolved hints were found in the bounded log slice.
+
+Collection has a three-second deadline, 256 KiB byte cap, and a 200-line tail. Timestamped logs are filtered from the earliest outstanding rollout start, with a recent 15-minute fallback for unknown external starts. At most ten deduplicated observations are retained, newest first; later `Drain succeeded on node` messages clear failures attributed to that node, not unrelated or unattributed messages. Log rotation, pod selection, truncation, and missing success messages limit completeness. Refresh follows worker reconciliations, not an independent log-polling loop. No refresh timestamp is written solely to trigger another reconcile.
 
 ---
 

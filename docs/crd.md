@@ -31,7 +31,8 @@ The `HostedClusterUpgrade` CR is designed to be user-centric, explicit, and easy
 | **`completionTime`** | `string` | RFC3339 timestamp when the entire upgrade process completed successfully. |
 | **`aggregatedNodeStatus`** | `object` | Summary of total, updated, and ready worker nodes summed across all NodePools (e.g., `{"total": 12, "updated": 4, "ready": 10}`). |
 | **`controlPlaneStatus`** | `object` | Detailed metrics of the control plane component verification, listing total components, upgraded components, and active component rollout blockers. |
-| **`nodePoolStatuses`** | `array` | Detailed list of NodePool-level progress, including individual nodes counts, scheduled start timestamps, active state, and failed node drain blockers (such as stuck PDBs). |
+| **`nodePoolStatuses`** | `array` | NodePool-level progress, node counts, schedules, and authoritative assessment/orchestration blockers. Unattributed HCCO logs are not pool blockers. |
+| **`drainDiagnostics`** | `object` | Best-effort cluster-level HCCO log hints: `available`, stable `reason` (`Collected`, `CollectionFailed`, `ScraperNotConfigured`), and at most ten recent `messages`. Unavailable collection is distinct from no observations. No NodePool/PDB ownership is inferred. |
 
 ---
 

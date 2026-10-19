@@ -97,7 +97,7 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
     *   Unpauses and upgrades groups sequentially, respecting your defined maximum parallelism limits.
 6.  **Troubleshooting & Drain Supervising:**
     *   If a node drain stalls, the coordinator **scrapes the logs** of the `hosted-cluster-config-operator` (HCCO) inside the control plane.
-    *   It extracts exact Pod Disruption Budget (PDB) blockers and identifies the specific blocked host name, surfacing them directly in the CR status and Grafana.
+    *   It reports best-effort cluster-level drain/eviction hints in `status.drainDiagnostics`, including collection availability. These logs do not establish NodePool or exact PDB ownership and never become per-pool blockers. Separate cluster-level metrics and alerts report observations and unavailable diagnostics.
 7.  **Final Verification & Sign-off:**
     *   Ensures all control plane components and worker nodes are successfully running and verified on the target version.
     *   Transitions to `Completed`, records duration analytics, and silences active alerts.
