@@ -348,6 +348,12 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 	// Admission may have been bypassed, and the cluster may have changed since
 	// admission. Recheck the remaining path before any resource mutations.
+	if err := upgradev1alpha1.RejectControlPlaneReleaseOverride(uHC); err != nil {
+		hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+		hcu.Status.Message = err.Error()
+		r.updateConditions(hcu)
+		return ctrl.Result{}, r.Status().Update(ctx, hcu)
+	}
 	if installing, _ := r.checkClusterInstallingAndHealth(uHC); !installing {
 		currentRelease, currentVersion := GetHostedClusterCurrentRelease(uHC)
 		if currentVersion != "" {

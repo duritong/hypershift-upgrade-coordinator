@@ -37,6 +37,19 @@ type upgradePathTestClient struct {
 	calls *int
 }
 
+func TestWebhookRejectsIndependentControlPlaneRelease(t *testing.T) {
+	hc := createMockHostedCluster("cluster", "clusters", "4.20.0")
+	_ = unstructured.SetNestedField(hc.Object, "independent", "spec", "controlPlaneRelease", "image")
+	v := &HostedClusterUpgradeCustomValidator{Client: upgradePathTestClient{hc: hc}}
+	hcu := &HostedClusterUpgrade{Spec: HostedClusterUpgradeSpec{TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("a", 64)}}
+	if _, err := v.ValidateCreate(context.Background(), hcu); err == nil || !strings.Contains(err.Error(), "controlPlaneRelease") {
+		t.Fatalf("create accepted override: %v", err)
+	}
+	if _, err := v.ValidateUpdate(context.Background(), hcu.DeepCopy(), hcu); err == nil || !strings.Contains(err.Error(), "controlPlaneRelease") {
+		t.Fatalf("unchanged-image update accepted override: %v", err)
+	}
+}
+
 func (c upgradePathTestClient) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
 	if c.calls != nil {
 		*c.calls++

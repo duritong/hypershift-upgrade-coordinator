@@ -70,6 +70,14 @@ func (v *HostedClusterUpgradeCustomValidator) ValidateUpdate(ctx context.Context
 		oldObj.Spec.IntermediateReleaseImage != newObj.Spec.IntermediateReleaseImage {
 		return nil, v.validateUpgradeSpec(ctx, newObj)
 	}
+	if v.Client != nil {
+		hc := &unstructured.Unstructured{}
+		hc.SetGroupVersionKind(hypershiftv1beta1.GroupVersion.WithKind("HostedCluster"))
+		if err := v.Client.Get(ctx, client.ObjectKeyFromObject(newObj), hc); err != nil {
+			return nil, err
+		}
+		return nil, RejectControlPlaneReleaseOverride(hc)
+	}
 
 	return nil, nil
 }
@@ -148,6 +156,9 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 	}
 
 	// 2. Extract current version from the HostedCluster status or spec (preferring Completed history entry).
+	if err := RejectControlPlaneReleaseOverride(uHC); err != nil {
+		return err
+	}
 	var currentRelease string
 	history, found, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
 	if found && len(history) > 0 {
@@ -193,5 +204,16 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 		return err
 	}
 
+	return nil
+}
+
+// RejectControlPlaneReleaseOverride keeps guest and management payloads on the
+// same coordinated path. Independent management-plane upgrades are unsupported.
+func RejectControlPlaneReleaseOverride(hc *unstructured.Unstructured) error {
+	if value, found, err := unstructured.NestedFieldNoCopy(hc.Object, "spec", "controlPlaneRelease"); err != nil {
+		return err
+	} else if found && value != nil {
+		return fmt.Errorf("HostedCluster spec.controlPlaneRelease override is unsupported; remove it before coordinating an upgrade")
+	}
 	return nil
 }
