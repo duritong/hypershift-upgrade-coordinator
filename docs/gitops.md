@@ -8,12 +8,12 @@ When deploying HyperShift clusters via GitOps, SREs define the desired state of 
 
 By default, the upgrade coordinator executes upgrades by **mutating the active resources on the cluster**:
 1.  During control plane upgrades, the coordinator updates `.spec.release.image` on the `HostedCluster`.
-2.  During NodePool upgrades, the coordinator updates `.spec.release.image` and unpauses `.spec.pausedUntil` (setting it to `"false"`) on `NodePool` resources.
+2.  During NodePool upgrades, the coordinator updates `.spec.release.image` and releases its owned worker locks by restoring the original `.spec.pausedUntil` value, including an absent field or an expired timestamp. It does not always set `"false"` or clear independent user pauses.
 
 If ArgoCD is set to auto-sync, **it will detect these mutations as out-of-sync drift and immediately overwrite (revert) them back to the old versions declared in Git**, interrupting the upgrade.
 
-### The Solution: `ignoreDifferences`
-To solve this, we configure ArgoCD to **ignore drift on specific fields managed by the coordinator** (while still accepting and syncing their initial bootstrap state). SREs then trigger upgrades exclusively by committing a separate `HostedClusterUpgrade` resource to Git!
+### The Solution: `ignoreDifferences` and `RespectIgnoreDifferences=true`
+Configure both options below: `ignoreDifferences` suppresses diff reporting, while `RespectIgnoreDifferences=true` also prevents later syncs (including syncs for unrelated changes) from overwriting these live fields. On resource creation there is no live state to preserve, so ArgoCD still applies the bootstrap values from Git. After creation, release changes belong in the matching `HostedClusterUpgrade`, not in the ignored fields of the cluster manifests.
 
 ---
 
@@ -40,6 +40,8 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
   
   # Configure ArgoCD to ignore drift on fields mutated by the Upgrade Coordinator
   ignoreDifferences:
@@ -77,7 +79,9 @@ spec:
   # ... rest of HostedCluster specs
 ```
 
-### B. `nodepools.yaml` (Declares worker NodePools, initially paused)
+### B. `nodepools.yaml` (Declares worker NodePools at the bootstrap release)
+Omit `pausedUntil` for normal bootstrap. An unannotated `pausedUntil: "true"` is a user-owned hold: the coordinator will neither adopt nor clear it, so it blocks worker upgrades until the user explicitly releases it. Let the coordinator acquire its own temporary locks; do not declare `worker-lock-owner` or `worker-lock-original-pause` annotation values in Git.
+
 ```yaml
 apiVersion: hypershift.openshift.io/v1beta1
 kind: NodePool
@@ -89,8 +93,7 @@ metadata:
 spec:
   clusterName: production-cluster-01
   replicas: 3
-  # NodePools must start as paused, allowing the coordinator to unpause them sequentially
-  pausedUntil: "true"
+  # No independent pause; the coordinator manages its own temporary worker lock.
   release:
     image: quay.io/openshift-release-dev/ocp-release:4.13.0-x86_64@sha256:74b23ed4bbb593195a721373ed6693687a9b444c97065ce8ac653ba464375711
 ---
@@ -104,13 +107,12 @@ metadata:
 spec:
   clusterName: production-cluster-01
   replicas: 6
-  pausedUntil: "true"
   release:
     image: quay.io/openshift-release-dev/ocp-release:4.13.0-x86_64@sha256:74b23ed4bbb593195a721373ed6693687a9b444c97065ce8ac653ba464375711
 ```
 
 ### C. `upgrade.yaml` (Commit this to trigger the automated upgrade to 4.14.0)
-To trigger a safe, staggered, and fully coordinated upgrade to `4.14.0` via `4.13.0`, SREs simply commit this manifest to the Git repository:
+After the matching HostedCluster exists, commit this manifest to upgrade from the bootstrap release `4.13.0` to `4.14.0`. Admission requires that HostedCluster to exist; use sync ordering or separate bootstrap and upgrade syncs.
 ```yaml
 apiVersion: upgrade.0xshift.dev/v1alpha1
 kind: HostedClusterUpgrade
@@ -136,13 +138,21 @@ spec:
 
 ---
 
-## 4. Critical Analysis & Troubleshooting Potential Issues
+## 4. Ownership Contract
+
+- Git owns initial resource creation and non-delegated configuration. After creation, delegate HostedCluster `spec.release.image` and NodePool `spec.release.image` / `spec.pausedUntil` to the coordinator using both ArgoCD settings above. Ignored Git values are still used if a resource is recreated; keep bootstrap manifests appropriate for that case.
+- Keep NodePool membership, `spec.clusterName`, and group labels stable during an active upgrade. Create new pools before starting or after completion and release of owned locks, using a release compatible with the current cluster. Adding or recreating pools mid-upgrade is outside this supported workflow; discovery is not a guarantee of continuous locking or schedule enforcement for newly created pools.
+- Do not let other automation or manual release writes compete with the coordinator during an active upgrade. External writes or removal of worker locks can bypass ordering, schedules, and pool concurrency limits. This is an operational contract, not admission-enforced exclusive ownership.
+- Lock annotations are runtime bookkeeping, not GitOps desired values. Do not template, copy, or force-remove them. Independent user pauses remain user-owned; see the [user guide](user-guide.md#independent-nodepool-pauses) for deliberate pause ownership changes.
+- Pausing the `HostedClusterUpgrade` is observe-only, not quiescence: it does not cancel HyperShift work already started, stop external writers, or release locks. Do not treat pause as a safe handoff for pool creation or competing release writes.
+
+## 5. Critical Analysis & Troubleshooting Potential Issues
 
 | Potential Issue | Root Cause | Operator Behavior / Mitigation |
 | :--- | :--- | :--- |
-| **Initial Bootstrap Overwrite** | SRE commits `HostedCluster` with version `A` and `HostedClusterUpgrade` with version `B` at the exact same time during cluster creation. | The coordinator's **preflight checks** will detect that the cluster is in its initial installation phase (`Installing` status). The coordinator halts and does not mutate any fields until the bootstrap installation on version `A` finishes completely, preventing race conditions. |
-| **Unintended Rollback Drift** | SRE accidentally updates the `HostedCluster` or `NodePool` release image fields inside Git to an old version after the upgrade has completed. | Because of the `ignoreDifferences` rules configured in ArgoCD, ArgoCD will **ignore** any difference between Git and the active cluster for these fields. It will not trigger a sync-rollback. Overrides can only be executed by deleting the old upgrade CR and creating a new one. |
-| **NodePool Pausing Lock** | SRE commits `nodepools.yaml` with `pausedUntil: "true"` to Git, but the coordinator sets it to `"false"` during rollout. | If `pausedUntil` is **not** included in the `ignoreDifferences` block, ArgoCD will instantly overwrite the coordinator's unpause instruction and set it back to `"true"`, freezing the NodePool upgrade permanently. **Mitigation**: Ensure `/spec/pausedUntil` is always included in the NodePool `ignoreDifferences` list as shown in the Application example above. |
+| **Initial Bootstrap Ordering** | HostedCluster and upgrade resources are synced together. | Admission requires the HostedCluster to exist first. Order creation; the coordinator then waits in `Installing` while initial installation is incomplete. This is not protection against arbitrary concurrent writers. |
+| **Unintended Rollback Drift** | Git still contains an older bootstrap release. | Both `ignoreDifferences` and `RespectIgnoreDifferences=true` preserve delegated live fields on later syncs. Change `targetReleaseImage` (and the optional intermediate) on the existing upgrade CR for the next valid forward upgrade; deletion/recreation is not required. Version safety validation still applies. |
+| **NodePool Pausing Lock** | A pool was created with an unannotated `pausedUntil: "true"`, or ArgoCD overwrites a coordinator lock. | Explicitly release the user-owned hold in the live NodePool; changing only the ignored Git field will not do so on later syncs. Configure both ArgoCD options to preserve coordinator changes, and do not manage lock annotation desired values. |
 | **ArgoCD Health Check Out-of-Sync** | ArgoCD marks the `HostedClusterUpgrade` resource as `Degraded` when an upgrade is paused or temporarily blocked. | **Solution**: Register a custom Lua health check in ArgoCD (configured in `argocd-cm` ConfigMap) to map `phase: Paused` to `Suspended` and `phase: Blocked` to `Progressing` or `Degraded` only if it exceeds an SLA threshold. |
 
 ### ArgoCD Custom Lua Health Check

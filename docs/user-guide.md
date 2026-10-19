@@ -11,8 +11,8 @@ The HyperShift Upgrade Coordinator is an Kubernetes operator designed to automat
 ### Key Capabilities
 *   **1:1 Naming Coalignment**: Enforces strict validation that the upgrade resource name exactly matches the target `HostedCluster`.
 *   **Staged Multi-Step Hops**: Supports upgrading via intermediate versions (e.g. EUS-to-EUS jumps) automatically.
-*   **Scheduled Phases**: Allows separate, chronological maintenance windows for the control plane and worker pools.
-*   **Priority serialization**: Groups and unpauses NodePool upgrades sequentially according to custom label ordering (`upgrade.huc.0xshift.dev/order`).
+*   **Scheduled Phases**: Provides separate earliest-start gates for the control plane and worker groups, not bounded maintenance windows.
+*   **Group serialization**: Upgrades NodePools in `spec.nodePoolGroups` order using the label `upgrade.huc.0xshift.dev/group`.
 *   **Live SRE Diagnostics**: Scrapes HCCO pod logs to extract PDBs and node drain blockages in real-time.
 
 ---
@@ -91,13 +91,13 @@ spec:
   # Optional EUS Intermediate release hop (Tag + SHA Digest are mandatory)
   intermediateReleaseImage: quay.io/openshift-release-dev/ocp-release:4.13.0-x86_64@sha256:74b23ed4bbb593195a721373ed6693687a9b444c97065ce8ac653ba464375711
 
-  # Maintenance window for the Hosted Control Plane
+  # Earliest start for the Hosted Control Plane
   controlPlane:
     startAt: "2026-08-15T02:00:00Z" # UTC Timestamp
 
-  # Concurrency settings for NodePool unpausing
+  # Pool concurrency, not a node disruption budget
   rolloutPolicy:
-    maxParallelNodePools: 2         # Up to 2 NodePools upgrading in parallel per priority group
+    maxParallelNodePools: 2         # Up to 2 NodePools upgrading in parallel within the active group
 
   # Ordered rollout sequence: first group in the list upgrades first!
   nodePoolGroups:
@@ -106,12 +106,19 @@ spec:
     - name: compute
       startAt: "2026-08-15T05:00:00Z"
 ```
-```
 
 Apply the upgrade CR to trigger the automation:
 ```bash
 oc apply -f upgrade.yaml
 ```
+
+For the next valid forward upgrade, update the existing CR's `targetReleaseImage`
+and optional `intermediateReleaseImage`; deletion/recreation is not required.
+Release changes remain subject to admission and controller version safety gates.
+For GitOps, configure both `ignoreDifferences` and `RespectIgnoreDifferences=true`
+as shown in the [GitOps guide](gitops.md). Initial creation applies Git's bootstrap
+values; later syncs preserve the delegated live fields. Do not declare worker-lock
+annotation values in Git.
 
 ---
 
@@ -143,10 +150,16 @@ Before making any mutations to the cluster, the coordinator performs strict, aut
 3.  **Pre-Step Health Re-verification**: These preflight checks do not run only once. The coordinator **re-runs these exact health evaluations immediately before initiating any transition** (e.g. unpausing a NodePool or shifting between EUS intermediate and target control plane versions) to ensure safety throughout the entire lifecycle.
 
 ### B. Pending Schedule (`PendingSchedule` Phase)
-Waits until the Hosted Control Plane's scheduled `startAt` maintenance window opens.
+Waits until the Hosted Control Plane's `startAt` earliest-start gate. Missing timestamps mean immediate execution after prerequisites pass; there is no end time or automatic stop when a maintenance window ends.
 
 ### C. Upgrading Control Plane (`UpgradingControlPlane` Phase)
 Applies the next release version (the `intermediateReleaseImage` if defined and not skipped, or the final `targetReleaseImage`) directly on the `spec.release.image` field of the target `HostedCluster`.
+
+The HostedCluster release also drives guest-cluster operands, not just hosted
+control-plane pods. Worker scheduling does not defer those operand updates.
+Control-plane upgrades are typically less disruptive to workloads than worker
+drains, but API availability, networking, and guest operand changes can affect
+workloads; there is no guaranteed disruption-free control-plane phase.
 
 ### D. Verifying Control Plane (`VerifyingControlPlane` Phase)
 The coordinator does not rely on simple high-level conditions to assume the control plane is upgraded. Instead, it runs exhaustive, low-level component verification:
@@ -157,7 +170,7 @@ The coordinator does not rely on simple high-level conditions to assume the cont
 3.  **Complete Readiness Gate**: Verification only succeeds when **all** active control plane components simultaneously report both `Available` and `RolloutComplete` on the expected target version. Only then is the control plane verified and worker NodePool upgrades initiated.
 
 ### E. Upgrading NodePools (`UpgradingNodePools` Phase)
-Unpauses and upgrades worker NodePools in sequential order based on spec-ordered groups, respecting group `startAt` schedules and global concurrency limits.
+Restores owned worker pauses and upgrades NodePools in spec-ordered groups, respecting group `startAt` gates and `rolloutPolicy.maxParallelNodePools` (default one) within the active group. This counts pools, not nodes: per-pool HyperShift rollout settings, replica counts, workload placement, and PDBs determine node-level disruption and available capacity.
 
 ### F. Completed (`Completed` Phase)
 Sets the final status once all Hosted Control Plane components and worker NodePools are fully verified on the target version.
@@ -167,7 +180,7 @@ Sets the final status once all Hosted Control Plane components and worker NodePo
 ## 7. Pausing & Troubleshooting
 
 ### How to Pause the Operator Lifecycle
-You can pause the entire upgrade coordinator at any time. This halts all state transitions and spec modifications, entering a safe, read-only "Observe-Only" monitoring mode.
+You can request a pause at any time. Once observed, the coordinator enters read-only "Observe-Only" monitoring mode for upgrade execution. This is not a quiescence barrier: already-started HyperShift rollouts and guest operand updates can continue, external writers are not stopped, and owned locks are not released. Deletion still invokes finalizer cleanup. Do not use pause as a safe ownership handoff for competing writes or new pools.
 
 #### Option A: Indefinite Pause
 Set `spec.pausedUntil: "true"` on your upgrade resource:
@@ -195,6 +208,8 @@ A NodePool's own `spec.pausedUntil` is independent of the coordinator pause.
 Unannotated `"true"` pauses are user-owned and are never automatically adopted or
 cleared. Future RFC3339 pauses block worker rollout until expiry; NodePool status
 reports the blocker and countdown, and reconciliation is scheduled for expiry.
+For normal bootstrap, omit `pausedUntil`; do not pre-pause pools with `"true"`
+expecting the coordinator to clear it.
 
 During control-plane work, the coordinator may temporarily extend a timed pause
 to `"true"` so it cannot expire before workers are eligible. It records the HCU UID
@@ -216,6 +231,17 @@ both lock annotations in the same update: writing the same value alone is not an
 observable ownership change. Do not manage these annotations as GitOps desired
 state. Pausing the coordinator remains observe-only and does not release locks or
 cancel rollouts already started by HyperShift.
+
+### Pool and Release Ownership
+
+Keep pool membership, `spec.clusterName`, and group labels stable during an active
+upgrade. Create or recreate pools before starting or after completion and release
+of owned locks, with releases compatible with the current cluster. Mid-upgrade
+pool creation is outside the supported workflow; discovery does not guarantee
+continuous locking or schedule enforcement for new pools. Avoid external release
+writes and lock removal during an upgrade: they can bypass ordering, schedules,
+and pool concurrency limits. These are operational requirements, not exclusive
+ownership enforced by admission. See the [GitOps ownership contract](gitops.md#4-ownership-contract).
 
 ### Troubleshooting Blocked Node Drains
 If a worker NodePool rollout stalls, the coordinator automatically scrapes the logs of the `hosted-cluster-config-operator` (HCCO) inside the target control plane namespace. 

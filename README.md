@@ -12,13 +12,13 @@ Upgrading a HyperShift cluster traditionally requires SREs to manually coordinat
 
 The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifies this. SREs define the **entire multi-step upgrade path once as a single declarative document** in Git, enabling:
 
-*   **Disruption-Aware Step Scheduling:** Schedule the control plane upgrade (non-disruptive to end-users) and the worker NodePool reboots (highly disruptive machine drains) to occur during completely separate maintenance windows.
+*   **Disruption-Aware Step Scheduling:** Set separate earliest-start gates for control-plane and worker NodePool upgrades. Control-plane upgrades are typically less disruptive than worker drains, but are not guaranteed disruption-free: the HostedCluster release also updates guest-cluster operands, which worker schedules do not defer.
 *   **Declarative EUS (Extended Update Support) Multi-Minor Jumps:** Declare a 2-minor version upgrade path (e.g., `4.12` -> `4.14` via EUS intermediate `4.13`) in a single field. The coordinator takes care of the sequential hops while keeping NodePools safely locked on the old version until the control plane reaches the final version.
 *   **Group-Based Ordered Rollouts:** Group worker NodePools into sequential upgrade phases using labels (`upgrade.huc.0xshift.dev/group`), enforcing that critical infrastructure nodes upgrade and verify before general compute nodes are touched.
-*   **Global Concurrency Limits:** Cap the number of NodePools allowed to roll out concurrently within a priority group (via `rolloutPolicy.maxParallelNodePools`) to preserve cluster capacity.
+*   **Pool Concurrency Limits:** Cap concurrent NodePool rollouts within the active group via `rolloutPolicy.maxParallelNodePools` (default one). This is a pool count, not a node disruption or capacity budget; per-pool rollout settings, replica counts, workload placement, and PDBs still matter.
 *   **Granular Pause & Resume Support:** Features both coordinator-level pausing (via `pausedUntil`, which supports indefinite pausing with `"true"` or scheduled pausing with an RFC3339 timestamp) and object-level control using HyperShift's native `spec.pausedUntil` fields.
 *   **Fleet-Wide Management & Dynamic Namespace Discovery:** Operates as a cluster-scoped fleet controller on the management cluster, automatically managing upgrades across dynamically provisioned clusters and their control planes, with optional namespace filtering via `--hosted-cluster-namespace`.
-*   **GitOps & ArgoCD Friendly:**  Upgrades can be merged upfront on Day 0 via GitOps, but executed staggered on Day 1 (non-disruptive Control Plane upgrade) and consecutive nights (disruptive worker NodePool reboots).
+*   **GitOps & ArgoCD Friendly:** Merge upgrades upfront and stagger control-plane and worker-group starts. ArgoCD needs both `ignoreDifferences` and `RespectIgnoreDifferences=true` to preserve coordinator-owned live fields during later syncs; creation still applies bootstrap values from Git. See the [GitOps guide](docs/gitops.md).
 
 ---
 
@@ -39,7 +39,7 @@ spec:
   # Optional EUS intermediate release hop tag + SHA-256 digest
   intermediateReleaseImage: quay.io/openshift-release-dev/ocp-release:4.13.0-x86_64@sha256:74b23ed4bbb593195a721373ed6693687a9b444c97065ce8ac653ba464375711
 
-  # Maintenance window for the Hosted Control Plane
+  # Earliest start for the Hosted Control Plane
   controlPlane:
     startAt: "2026-08-15T02:00:00Z"
 
@@ -47,13 +47,27 @@ spec:
   rolloutPolicy:
     maxParallelNodePools: 1
 
-  # Chronological start windows for NodePool rollout groups
+  # Earliest-start gates for ordered NodePool rollout groups
   nodePoolGroups:
     - name: infra
       startAt: "2026-08-15T04:00:00Z"
     - name: compute
       startAt: "2026-08-15T05:00:00Z"
 ```
+
+Update the existing upgrade CR for the next valid forward release; deletion and
+recreation are not required. For normal NodePool bootstrap, omit `pausedUntil`:
+unannotated `"true"` pauses are user-owned and never automatically cleared. The
+coordinator restores original pause values when releasing its locks, rather than
+always setting `"false"`. Do not manage worker-lock annotation desired values in Git.
+
+Keep pool membership and group labels stable and avoid external release writes or
+lock removal during an active upgrade. Create new pools before starting or after
+completion and lock release; mid-upgrade pool creation is outside the supported
+workflow. Coordinator pause is observe-only, not quiescence: HyperShift rollouts
+and guest operand updates already started can continue. See the
+[ownership contract](docs/gitops.md#4-ownership-contract) for these operational
+requirements and limitations.
 
 ---
 
@@ -70,9 +84,9 @@ Once you apply a `HostedClusterUpgrade` CR, the coordinator acts as a vigilant, 
     *   Checks that there are no active `Failing` or `Degraded` conditions on the `HostedCluster`.
     *   *If unhealthy, the operator halts instantly and sounds the alarm (via Prometheus alerts).*
 2.  **Scheduling Window Gate:**
-    *   Computes exact count-downs and halts until your scheduled maintenance window opens.
+    *   Reports count-downs and waits for earliest-start gates; these have no end time or automatic stop.
 3.  **Control Plane Hops (EUS Hops):**
-    *   Automatically locks/pauses all worker NodePools to guarantee zero control-plane-to-node version skew breakage.
+    *   Acquires owned locks on existing worker NodePools before control-plane changes, preserving independent user pauses. This is not continuous enforcement against new pools or external writes.
     *   Upgrades the control plane to the intermediate version first, verifies it, and only then proceeds to the final target version image.
     *   *Self-Healing Skip:* If the cluster is already running a newer version than the intermediate, the operator intelligently skips it.
 4.  **Control Plane Verification:**
