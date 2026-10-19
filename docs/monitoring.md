@@ -97,7 +97,10 @@ Unlike the ratios, the blocked-pool metric already exports version labels and ca
 hypershift_upgrade_nodepool_blocked{current_version=~"$current_version", target_version=~"$target_version"} == 1
 ```
 
-The queries assume `namespace` is the upgrade resource's namespace. Scrape configuration must preserve that metric label rather than replace it with the coordinator pod's namespace (for example, via an appropriate `honorLabels` or relabeling policy). Dashboard queries do not resolve scrape-label conflicts.
+The packaged ServiceMonitor sets `honorLabels: true` so `namespace` remains the
+upgrade resource's namespace rather than the coordinator Service's namespace.
+Custom scrape configurations must preserve that label as well; otherwise alerts
+can report the wrong cluster namespace and dashboard identity joins are invalid.
 
 ### Regression Validation
 
