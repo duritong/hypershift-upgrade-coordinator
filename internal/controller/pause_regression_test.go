@@ -68,6 +68,10 @@ func TestPausedTargetChangeUpgradesControlPlaneFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = reconcileRegression(t, c)
+	if got.Status.Phase == upgradev1alpha1.PhasePendingSchedule {
+		got = reconcileRegression(t, c)
+		got = reconcileRegression(t, c)
+	}
 	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane || got.Status.ControlPlaneStatus.TargetReleaseImage != got.Spec.TargetReleaseImage {
 		t.Fatalf("new target bypassed control plane: %+v", got.Status)
 	}
@@ -77,6 +81,25 @@ func TestPausedTargetChangeUpgradesControlPlaneFirst(t *testing.T) {
 	image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
 	if image == got.Spec.TargetReleaseImage {
 		t.Fatal("workers advanced before control plane verification")
+	}
+}
+
+func TestChangedActivePlanRespectsControlPlaneSchedule(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+	hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+	hcu.Spec.TargetReleaseImage = regressionImage("4.22.0")
+	future := metav1.NewTime(time.Now().Add(time.Hour))
+	hcu.Spec.ControlPlane.StartAt = &future
+	hc := regressionHC("4.21.0")
+	c := &regressionClient{objects: []client.Object{hcu, hc}}
+	for range 2 {
+		got := reconcileRegression(t, c)
+		if got.Status.Phase != upgradev1alpha1.PhasePendingSchedule {
+			t.Fatalf("changed plan bypassed future control plane schedule: %+v", got.Status)
+		}
+	}
+	if c.writes != 0 {
+		t.Fatal("changed plan actuated before schedule opened")
 	}
 }
 

@@ -375,7 +375,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 	if hcu.Status.Phase == upgradev1alpha1.PhaseUpgradingNodePools && hcu.Status.ControlPlaneStatus.TargetReleaseImage != "" && hcu.Status.ControlPlaneStatus.TargetReleaseImage != hcu.Spec.TargetReleaseImage {
 		// A changed plan must verify its new control plane before touching workers.
-		hcu.Status.Phase = upgradev1alpha1.PhaseUpgradingControlPlane
+		hcu.Status.Phase = upgradev1alpha1.PhasePreflightChecks
 	}
 	if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
 		completedImage := hcu.Status.ControlPlaneStatus.TargetReleaseImage
