@@ -1,5 +1,11 @@
 # Release Payload Validation
 
+The single target payload must also match every associated NodePool's `spec.arch`
+(HyperShift's omitted value defaults to `amd64`). Mixed-architecture fleets within
+one HostedCluster require a multiarchitecture payload strategy and are rejected
+by this coordinator's current single-architecture release contract before any
+worker locks or release writes.
+
 Admission validates release pullspec syntax and the claimed version path without
 contacting registries. Before active reconciliation can lock workers or change a
 HostedCluster or NodePool, the controller also verifies the actual digest-pinned

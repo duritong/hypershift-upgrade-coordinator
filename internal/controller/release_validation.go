@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
+	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +44,19 @@ func (r *HostedClusterUpgradeReconciler) verifyReleasePayloads(ctx context.Conte
 	_, targetArch, err := upgradev1alpha1.ParseReleaseImageMetadata(hcu.Spec.TargetReleaseImage)
 	if err != nil {
 		return fmt.Errorf("target release image claim is invalid")
+	}
+	pools, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name)
+	if err != nil {
+		return fmt.Errorf("cannot observe worker architectures for release validation")
+	}
+	for _, pool := range pools.Items {
+		arch, _, err := unstructured.NestedString(pool.Object, "spec", "arch")
+		if arch == "" {
+			arch = "amd64"
+		}
+		if err != nil || hypershiftv1beta1.ArchAliases[arch] != targetArch {
+			return fmt.Errorf("NodePool %q architecture %q is incompatible with target payload architecture %q", pool.GetName(), arch, targetArch)
+		}
 	}
 	images := []struct{ step, image string }{{"target", hcu.Spec.TargetReleaseImage}}
 	if intermediate := hcu.Spec.IntermediateReleaseImage; intermediate != "" {

@@ -212,3 +212,15 @@ func TestReleaseValidationPauseDoesNotRequireRegistry(t *testing.T) {
 		t.Fatalf("pause required registry or performed writes: phase=%s writes=%d", got.Status.Phase, c.writes)
 	}
 }
+
+func TestReleasePayloadMatchesWorkerArchitecture(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePendingSchedule)
+	np := regressionNP("arm-workers", "")
+	_ = unstructured.SetNestedField(np.Object, "arm64", "spec", "arch")
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0"), np}}
+	r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
+	got := reconcileReleaseTest(t, r, c, hcu)
+	if got.Status.Phase != upgradev1alpha1.PhaseBlocked || !strings.Contains(got.Status.Message, "architecture") || c.writes != 0 {
+		t.Fatalf("incompatible worker architecture was accepted: %+v writes=%d", got.Status, c.writes)
+	}
+}
