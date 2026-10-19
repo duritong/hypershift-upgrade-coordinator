@@ -205,6 +205,11 @@ pools also have their coordinator locks restored. Foreign-owned locks block
 progress rather than being adopted. Failure to acquire worker locks prevents
 control-plane mutation.
 
+Deleting a coordinator restores its owned worker pauses before removing its
+`upgrade.huc.0xshift.dev/worker-locks` finalizer. It does not revert release images
+or cancel rollouts already started by HyperShift. Do not force-remove the
+finalizer unless you have restored its owned worker pauses manually.
+
 Changing a coordinator-locked pool to a different pause value preserves your new
 value. To replace its `"true"` lock with your own identical `"true"` pause, remove
 both lock annotations in the same update: writing the same value alone is not an

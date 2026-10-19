@@ -49,7 +49,9 @@ func (c *regressionClient) List(_ context.Context, out client.ObjectList, opts .
 }
 
 func (c *regressionClient) Update(_ context.Context, obj client.Object, _ ...client.UpdateOption) error {
-	c.writes++
+	if _, downstream := obj.(*unstructured.Unstructured); downstream {
+		c.writes++
+	}
 	return c.store(obj)
 }
 

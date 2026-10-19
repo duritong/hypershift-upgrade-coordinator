@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -1233,6 +1234,45 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				return fetched.Status.Phase
 			}, timeout, interval).Should(Equal(upgradev1alpha1.PhaseBlocked))
+		})
+
+		It("restores worker locks before deletion and permits recreating an upgrade", func() {
+			clusterName := "deletion-cleanup"
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.0"))
+			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
+			np := createAndSetStatusNodePool(ctx, "deletion-worker", namespace, clusterName, regressionImage("4.20.0"))
+			defer func() { _ = k8sClient.Delete(ctx, np) }()
+			future := metav1.NewTime(time.Now().Add(time.Hour))
+			template := &upgradev1alpha1.HostedClusterUpgrade{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
+				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
+					TargetReleaseImage: regressionImage("4.21.0"),
+					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{StartAt: &future},
+				},
+			}
+			var previousUID types.UID
+			for range 2 {
+				hcu := template.DeepCopy()
+				Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
+				Expect(hcu.UID).NotTo(Equal(previousUID))
+				previousUID = hcu.UID
+				Eventually(func() string {
+					current := np.DeepCopy()
+					if err := k8sClient.Get(ctx, types.NamespacedName{Name: np.GetName(), Namespace: namespace}, current); err != nil {
+						return ""
+					}
+					return current.GetAnnotations()[workerLockOwner]
+				}, timeout, interval).Should(Equal(string(hcu.UID)))
+				Expect(k8sClient.Delete(ctx, hcu)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, &upgradev1alpha1.HostedClusterUpgrade{}))
+				}, timeout, interval).Should(BeTrue())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: np.GetName(), Namespace: namespace}, np)).To(Succeed())
+				_, found, err := unstructured.NestedString(np.Object, "spec", "pausedUntil")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeFalse())
+				Expect(np.GetAnnotations()).NotTo(HaveKey(workerLockOwner))
+			}
 		})
 
 		It("Issue 3.1: should safely handle KubeLogScraper with nil client, deduplicate and bound log blockers to 10 entries", func() {

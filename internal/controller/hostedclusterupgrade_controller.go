@@ -37,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -228,6 +229,39 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	// Filter by target namespace if configured
 	if r.HostedClusterNamespace != "" && hcu.Namespace != r.HostedClusterNamespace {
 		return ctrl.Result{}, nil
+	}
+	if !hcu.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(hcu, workerLocksFinalizer) {
+			pools := &unstructured.UnstructuredList{}
+			pools.SetGroupVersionKind(gvkNP)
+			if err := r.List(ctx, pools, client.InNamespace(hcu.Namespace)); err != nil {
+				return ctrl.Result{}, err
+			}
+			for _, pool := range pools.Items {
+				if pool.GetAnnotations()[workerLockOwner] != string(hcu.UID) {
+					continue
+				}
+				if changed, err := restoreNodePoolLock(&pool, hcu); err != nil {
+					return ctrl.Result{}, err
+				} else if changed {
+					if err := r.Update(ctx, &pool); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
+			}
+			controllerutil.RemoveFinalizer(hcu, workerLocksFinalizer)
+			if err := r.Update(ctx, hcu); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		clearUpgradeGauges(hcu.Namespace, hcu.Name)
+		return ctrl.Result{}, nil
+	}
+	// Register cleanup before acquiring any worker locks.
+	if controllerutil.AddFinalizer(hcu, workerLocksFinalizer) {
+		if err := r.Update(ctx, hcu); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Save original status for deep-equal check later to avoid redundant updates
@@ -710,8 +744,9 @@ func (r *HostedClusterUpgradeReconciler) updateConditions(hcu *upgradev1alpha1.H
 }
 
 const (
-	workerLockOwner    = "upgrade.huc.0xshift.dev/worker-lock-owner"
-	workerLockOriginal = "upgrade.huc.0xshift.dev/worker-lock-original-pause"
+	workerLocksFinalizer = "upgrade.huc.0xshift.dev/worker-locks"
+	workerLockOwner      = "upgrade.huc.0xshift.dev/worker-lock-owner"
+	workerLockOriginal   = "upgrade.huc.0xshift.dev/worker-lock-original-pause"
 )
 
 // nodePoolPause reads the effective user pause, not the temporary coordinator lock.
