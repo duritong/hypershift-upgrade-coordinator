@@ -141,3 +141,35 @@ func TestCompletedUpgradeNewTarget(t *testing.T) {
 		})
 	}
 }
+
+func regressionNP(name, group string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvkNP)
+	u.SetNamespace("clusters")
+	u.SetName(name)
+	u.SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": group})
+	_ = unstructured.SetNestedField(u.Object, "example", "spec", "clusterName")
+	_ = unstructured.SetNestedField(u.Object, regressionImage("4.20.0"), "spec", "release", "image")
+	_ = unstructured.SetNestedField(u.Object, int64(1), "status", "replicas")
+	return u
+}
+
+func TestNodePoolGroupSafety(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("duplicate=%t", duplicate), func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+			hcu.Spec.NodePoolGroups = []upgradev1alpha1.NodePoolGroupSpec{{Name: "infra"}}
+			group := "unknown"
+			if duplicate {
+				group = "infra"
+				hcu.Spec.NodePoolGroups = append(hcu.Spec.NodePoolGroups, upgradev1alpha1.NodePoolGroupSpec{Name: "infra"})
+			}
+			c := &regressionClient{objects: []client.Object{regressionNP("workers", group)}}
+			r := &HostedClusterUpgradeReconciler{Client: c}
+			_, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0"))
+			if err == nil || c.writes != 0 || hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
+				t.Fatalf("invalid groups must block without mutations: err=%v writes=%d phase=%s", err, c.writes, hcu.Status.Phase)
+			}
+		})
+	}
+}

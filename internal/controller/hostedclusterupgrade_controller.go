@@ -784,7 +784,14 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	// 3. Build group execution sequence and map schedules
 	var groupSequence []string
 	hasDefault := false
+	knownGroups := map[string]bool{"default": true}
+	seenGroups := make(map[string]bool)
 	for _, g := range hcu.Spec.NodePoolGroups {
+		if g.Name == "" || seenGroups[g.Name] {
+			return false, 0, fmt.Errorf("NodePool group names must be nonempty and unique: %q", g.Name)
+		}
+		seenGroups[g.Name] = true
+		knownGroups[g.Name] = true
 		groupSequence = append(groupSequence, g.Name)
 		if g.Name == "default" {
 			hasDefault = true
@@ -820,6 +827,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		groupName := "default"
 		if labels != nil && labels["upgrade.huc.0xshift.dev/group"] != "" {
 			groupName = labels["upgrade.huc.0xshift.dev/group"]
+		}
+		if !knownGroups[groupName] {
+			return false, 0, fmt.Errorf("NodePool %q references unknown group %q; add it to spec.nodePoolGroups or change the pool label", name, groupName)
 		}
 
 		pUntil, _, _ := unstructured.NestedString(np.Object, "spec", "pausedUntil")
