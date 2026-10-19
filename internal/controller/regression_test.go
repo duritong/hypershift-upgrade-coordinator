@@ -21,7 +21,7 @@ import (
 type regressionClient struct {
 	client.Client
 	objects []client.Object
-	writes int
+	writes  int
 }
 
 func (c *regressionClient) Get(_ context.Context, key client.ObjectKey, out client.Object, _ ...client.GetOption) error {
@@ -95,8 +95,8 @@ func regressionHC(version string) *unstructured.Unstructured {
 func regressionHCU(phase upgradev1alpha1.UpgradePhase) *upgradev1alpha1.HostedClusterUpgrade {
 	return &upgradev1alpha1.HostedClusterUpgrade{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "clusters", Name: "example", Generation: 1},
-		Spec: upgradev1alpha1.HostedClusterUpgradeSpec{TargetReleaseImage: regressionImage("4.21.0")},
-		Status: upgradev1alpha1.HostedClusterUpgradeStatus{Phase: phase},
+		Spec:       upgradev1alpha1.HostedClusterUpgradeSpec{TargetReleaseImage: regressionImage("4.21.0")},
+		Status:     upgradev1alpha1.HostedClusterUpgradeStatus{Phase: phase},
 	}
 }
 
@@ -200,5 +200,60 @@ func TestControllerRecoveryAtTargetVerifiesComponents(t *testing.T) {
 	got = reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
 		t.Fatalf("missing CPCs must prevent workers: %s", got.Status.Phase)
+	}
+}
+
+func TestNodePoolReadinessEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name                              string
+		replicas, ready, unready          int64
+		version                           string
+		info                              bool
+		wantTotal, wantUpdated, wantReady int32
+	}{
+		{"version alone", 3, 0, 0, "4.21.0", false, 3, 0, 0},
+		{"target ready", 3, 3, 0, "4.21.0", true, 3, 3, 3},
+		{"target unready", 3, 0, 3, "4.21.0", true, 3, 3, 0},
+		{"old ready", 3, 3, 0, "4.20.0", true, 3, 0, 3},
+		{"newer is not target", 3, 3, 0, "4.22.0", true, 3, 0, 3},
+		{"desired exceeds observed", 1, 1, 0, "4.21.0", true, 3, 1, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			np := regressionNP("workers", "")
+			_ = unstructured.SetNestedField(np.Object, int64(3), "spec", "replicas")
+			_ = unstructured.SetNestedField(np.Object, tt.replicas, "status", "replicas")
+			_ = unstructured.SetNestedField(np.Object, tt.version, "status", "version")
+			if tt.info {
+				_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
+					"ocpVersion": tt.version, "readyNodeCount": tt.ready, "unreadyNodeCount": tt.unready,
+				}}, "status", "nodesInfo", "nodeVersions")
+			}
+			total, updated, ready := GetNodePoolNodeCounts(np, regressionImage("4.21.0"))
+			if total != tt.wantTotal || updated != tt.wantUpdated || ready != tt.wantReady {
+				t.Fatalf("counts = %d/%d/%d, want %d/%d/%d", total, updated, ready, tt.wantTotal, tt.wantUpdated, tt.wantReady)
+			}
+		})
+	}
+}
+
+func TestNodePoolMissingReadinessDoesNotComplete(t *testing.T) {
+	for _, missingReplicas := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missingReplicas=%t", missingReplicas), func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+			np := regressionNP("workers", "")
+			_ = unstructured.SetNestedField(np.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+			_ = unstructured.SetNestedField(np.Object, "4.21.0", "status", "version")
+			if missingReplicas {
+				unstructured.RemoveNestedField(np.Object, "status", "replicas")
+			}
+			c := &regressionClient{objects: []client.Object{np}}
+			r := &HostedClusterUpgradeReconciler{Client: c}
+			if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
+				t.Fatal(err)
+			}
+			if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
+				t.Fatal("NodePool completed without node readiness evidence")
+			}
+		})
 	}
 }

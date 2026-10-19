@@ -94,6 +94,7 @@ func createAndSetStatusNodePool(ctx context.Context, name, namespace, clusterNam
 
 	_ = unstructured.SetNestedField(np.Object, clusterName, "spec", "clusterName")
 	_ = unstructured.SetNestedField(np.Object, releaseImage, "spec", "release", "image")
+	_ = unstructured.SetNestedField(np.Object, int64(1), "spec", "replicas")
 	_ = unstructured.SetNestedMap(np.Object, map[string]interface{}{"autoRepair": false, "upgradeType": "Replace"}, "spec", "management")
 	_ = unstructured.SetNestedMap(np.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
 
@@ -101,9 +102,18 @@ func createAndSetStatusNodePool(ctx context.Context, name, namespace, clusterNam
 
 	ver, _ := upgradev1alpha1.ExtractVersion(releaseImage)
 	_ = unstructured.SetNestedField(np.Object, ver, "status", "version")
+	setReadyNodePoolStatus(np, ver)
 	Expect(k8sClient.Status().Update(ctx, np)).To(Succeed())
 
 	return np
+}
+
+func setReadyNodePoolStatus(np *unstructured.Unstructured, version string) {
+	_ = unstructured.SetNestedField(np.Object, int64(1), "status", "replicas")
+	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
+		"ocpVersion": version, "kubeletVersion": "v1.32.0",
+		"readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
+	}}, "status", "nodesInfo", "nodeVersions")
 }
 
 func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured) {
@@ -431,6 +441,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			fetchedNPA.SetGroupVersionKind(gvkNP)
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pool-a", Namespace: namespace}, fetchedNPA)).To(Succeed())
 			_ = unstructured.SetNestedField(fetchedNPA.Object, "4.22.2", "status", "version")
+			setReadyNodePoolStatus(fetchedNPA, "4.22.2")
 			Expect(k8sClient.Status().Update(ctx, fetchedNPA)).To(Succeed())
 
 			// 6. Verify that compute group NodePools (pool-b and pool-c) both begin upgrading in parallel!
@@ -476,12 +487,14 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			fetchedNPB.SetGroupVersionKind(gvkNP)
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pool-b", Namespace: namespace}, fetchedNPB)).To(Succeed())
 			_ = unstructured.SetNestedField(fetchedNPB.Object, "4.22.2", "status", "version")
+			setReadyNodePoolStatus(fetchedNPB, "4.22.2")
 			Expect(k8sClient.Status().Update(ctx, fetchedNPB)).To(Succeed())
 
 			fetchedNPC := &unstructured.Unstructured{}
 			fetchedNPC.SetGroupVersionKind(gvkNP)
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pool-c", Namespace: namespace}, fetchedNPC)).To(Succeed())
 			_ = unstructured.SetNestedField(fetchedNPC.Object, "4.22.2", "status", "version")
+			setReadyNodePoolStatus(fetchedNPC, "4.22.2")
 			Expect(k8sClient.Status().Update(ctx, fetchedNPC)).To(Succeed())
 
 			// 9. Verify that fallback default group (pool-d) is now unpaused and begins upgrading!

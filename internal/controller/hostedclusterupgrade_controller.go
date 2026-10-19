@@ -905,7 +905,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			updVer := isNodePoolUpdatingVersion(&np.object)
 			isDone := npSpecRelease == targetReleaseImage &&
 				npVer != "" &&
-				!upgradev1alpha1.IsUpstreamGreater(npVer, targetVer) &&
+				npVer == targetVer &&
 				!updVer &&
 				(rCount == 0 || (uCount >= rCount && rdyCount >= rCount))
 
@@ -936,10 +936,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 			reqLogger.Info("Evaluating NodePool specs", "name", np.name, "group", grpName, "npVer", npVer, "targetVer", targetVer, "pausedUntil", np.pausedUntil)
 
-			// NodePool is complete if spec release matches target, version is at or above target, not updating, and all replicas updated/ready
+			// Completion requires the expected version and every desired node updated and ready.
 			isUpgraded := npSpecRelease == targetReleaseImage &&
 				npVer != "" &&
-				!upgradev1alpha1.IsUpstreamGreater(npVer, targetVer) &&
+				npVer == targetVer &&
 				!updatingVersion &&
 				(replicas == 0 || (updatedReplicas >= replicas && readyReplicas >= replicas))
 
@@ -1318,7 +1318,15 @@ func GetHostedClusterCurrentRelease(uHC *unstructured.Unstructured) (string, str
 
 // GetNodePoolNodeCounts extracts total, updated, and ready node counts from NodePool status.
 func GetNodePoolNodeCounts(np *unstructured.Unstructured, targetReleaseImage string) (int32, int32, int32) {
-	totalReplicas, _, _ := unstructured.NestedInt64(np.Object, "status", "replicas")
+	totalReplicas, observed, _ := unstructured.NestedInt64(np.Object, "status", "replicas")
+	desiredReplicas, desired, _ := unstructured.NestedInt64(np.Object, "spec", "replicas")
+	if desired && desiredReplicas > totalReplicas {
+		totalReplicas = desiredReplicas
+	}
+	if !observed && !desired {
+		// Missing status is not evidence of an intentionally scaled-to-zero pool.
+		totalReplicas = 1
+	}
 	total := int32(totalReplicas)
 
 	targetVer, err := upgradev1alpha1.ExtractVersion(targetReleaseImage)
@@ -1341,20 +1349,9 @@ func GetNodePoolNodeCounts(np *unstructured.Unstructured, targetReleaseImage str
 
 			if err == nil && ocpVer != "" {
 				extractedOcpVer, errExt := upgradev1alpha1.ExtractVersion(ocpVer)
-				if errExt == nil && !upgradev1alpha1.IsUpstreamGreater(extractedOcpVer, targetVer) {
-					// extractedOcpVer >= targetVer
+				if errExt == nil && extractedOcpVer == targetVer {
 					updatedSum += int32(rCount + uCount)
 				}
-			}
-		}
-	} else {
-		// Fallback: If nodesInfo is not yet populated by operator, check status.version
-		statusVer, _, _ := unstructured.NestedString(np.Object, "status", "version")
-		if statusVer != "" && err == nil {
-			extractedStatusVer, errExt := upgradev1alpha1.ExtractVersion(statusVer)
-			if errExt == nil && !upgradev1alpha1.IsUpstreamGreater(extractedStatusVer, targetVer) {
-				updatedSum = total
-				readySum = total
 			}
 		}
 	}
