@@ -234,6 +234,7 @@ func TestNodePoolStepTimersPersistAndCompleteIndependently(t *testing.T) {
 			_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
 				"ocpVersion": "4.21.0", "readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
 			}}, "status", "nodesInfo", "nodeVersions")
+			c.objects = append(c.objects, readyWorkerFixture(np, resumed.Spec.TargetReleaseImage))
 			c.objects[i] = np
 		}
 	}

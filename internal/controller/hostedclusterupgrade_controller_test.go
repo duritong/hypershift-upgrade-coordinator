@@ -97,7 +97,7 @@ func createAndSetStatusNodePool(ctx context.Context, name, namespace, clusterNam
 	_ = unstructured.SetNestedField(np.Object, releaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedField(np.Object, int64(1), "spec", "replicas")
 	_ = unstructured.SetNestedMap(np.Object, map[string]interface{}{"autoRepair": false, "upgradeType": "Replace"}, "spec", "management")
-	_ = unstructured.SetNestedMap(np.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
+	_ = unstructured.SetNestedMap(np.Object, map[string]interface{}{"type": "AWS", "aws": map[string]interface{}{"instanceType": "m5.large", "subnet": map[string]interface{}{"id": "subnet-test"}}}, "spec", "platform")
 
 	Expect(k8sClient.Create(ctx, np)).To(Succeed())
 
@@ -110,6 +110,31 @@ func createAndSetStatusNodePool(ctx context.Context, name, namespace, clusterNam
 }
 
 func setReadyNodePoolStatus(np *unstructured.Unstructured, version string) {
+	image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
+	readyWorkerFixture(np, image)
+	Expect(k8sClient.Update(context.Background(), np)).To(Succeed())
+	md := readyWorkerFixture(np, image)
+	mdStatus, _, _ := unstructured.NestedMap(md.Object, "status")
+	ns := &unstructured.Unstructured{}
+	ns.SetAPIVersion("v1")
+	ns.SetKind("Namespace")
+	ns.SetName(md.GetNamespace())
+	if err := k8sClient.Create(context.Background(), ns); err != nil {
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+	}
+	old := &unstructured.Unstructured{}
+	old.SetGroupVersionKind(gvkMachineDeployment)
+	err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: md.GetNamespace(), Name: md.GetName()}, old)
+	if apierrors.IsNotFound(err) {
+		Expect(k8sClient.Create(context.Background(), md)).To(Succeed())
+	} else {
+		Expect(err).NotTo(HaveOccurred())
+		md.SetResourceVersion(old.GetResourceVersion())
+		Expect(k8sClient.Update(context.Background(), md)).To(Succeed())
+	}
+	_ = unstructured.SetNestedMap(md.Object, mdStatus, "status")
+	_ = unstructured.SetNestedField(md.Object, md.GetGeneration(), "status", "observedGeneration")
+	Expect(k8sClient.Status().Update(context.Background(), md)).To(Succeed())
 	_ = unstructured.SetNestedField(np.Object, int64(1), "status", "replicas")
 	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
 		"ocpVersion": version, "kubeletVersion": "v1.32.0",
@@ -121,7 +146,9 @@ func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured)
 	ns := &unstructured.Unstructured{}
 	ns.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
 	ns.SetName(hc.GetNamespace() + "-" + hc.GetName())
-	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+	if err := k8sClient.Create(ctx, ns); err != nil {
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+	}
 	DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
 	cpc := &unstructured.Unstructured{}
 	cpc.SetGroupVersionKind(gvkCPC)

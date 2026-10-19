@@ -185,6 +185,9 @@ func TestWorkerLockRestoresOriginal(t *testing.T) {
 					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
 				}
 				c := &regressionClient{objects: []client.Object{np}}
+				if completed {
+					c.objects = append(c.objects, readyWorkerFixture(np, hcu.Spec.TargetReleaseImage))
+				}
 				r := &HostedClusterUpgradeReconciler{Client: c}
 				if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 					t.Fatal(err)
@@ -231,7 +234,8 @@ func TestWorkerCompletedUserPauseUnchanged(t *testing.T) {
 			_ = unstructured.SetNestedField(np.Object, "4.21.0", "status", "version")
 			_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
 			_ = unstructured.SetNestedField(np.Object, pause, "spec", "pausedUntil")
-			c := &regressionClient{objects: []client.Object{np}}
+			md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
+			c := &regressionClient{objects: []client.Object{np, md}}
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)
@@ -332,7 +336,8 @@ func TestWorkerCoordinatorPauseLeavesOwnedCompletedLock(t *testing.T) {
 	_ = unstructured.SetNestedField(np.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedField(np.Object, "4.21.0", "status", "version")
 	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
-	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np}}
+	md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np, md}}
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)

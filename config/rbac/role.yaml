@@ -13,6 +13,15 @@ rules:
   - get
   - list
 - apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machinedeployments
+  - machinesets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - hypershift.openshift.io
   resources:
   - controlplanecomponents

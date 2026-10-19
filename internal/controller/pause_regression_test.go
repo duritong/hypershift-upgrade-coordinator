@@ -47,7 +47,8 @@ func TestPauseObservesWorkerCompletion(t *testing.T) {
 	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
 		"ocpVersion": "4.21.0", "readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
 	}}, "status", "nodesInfo", "nodeVersions")
-	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np}}
+	md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np, md}}
 	got := reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhasePaused || c.writes != 0 || got.Status.AggregatedNodeStatus.Ready != 1 || got.Status.NodePoolStatuses[0].Phase != "Completed" {
 		t.Fatalf("pause did not observe worker completion without actuation: status=%+v writes=%d", got.Status, c.writes)

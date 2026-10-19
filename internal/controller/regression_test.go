@@ -151,6 +151,8 @@ func regressionNP(name, group string) *unstructured.Unstructured {
 	u.SetName(name)
 	u.SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": group})
 	_ = unstructured.SetNestedField(u.Object, "example", "spec", "clusterName")
+	_ = unstructured.SetNestedField(u.Object, "AWS", "spec", "platform", "type")
+	_ = unstructured.SetNestedField(u.Object, "Replace", "spec", "management", "upgradeType")
 	_ = unstructured.SetNestedField(u.Object, regressionImage("4.20.0"), "spec", "release", "image")
 	_ = unstructured.SetNestedField(u.Object, int64(1), "status", "replicas")
 	return u
@@ -216,8 +218,8 @@ func TestNodePoolReadinessEvidence(t *testing.T) {
 		{"version alone", 3, 0, 0, "4.21.0", false, 3, 0, 0},
 		{"target ready", 3, 3, 0, "4.21.0", true, 3, 3, 3},
 		{"target unready", 3, 0, 3, "4.21.0", true, 3, 3, 0},
-		{"old ready", 3, 3, 0, "4.20.0", true, 3, 0, 3},
-		{"newer is not target", 3, 3, 0, "4.22.0", true, 3, 0, 3},
+		{"old ready", 3, 3, 0, "4.20.0", true, 3, 0, 0},
+		{"newer is not target", 3, 3, 0, "4.22.0", true, 3, 0, 0},
 		{"desired exceeds observed", 1, 1, 0, "4.21.0", true, 3, 1, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

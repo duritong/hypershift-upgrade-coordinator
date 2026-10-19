@@ -209,6 +209,7 @@ func init() {
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/finalizers,verbs=update
 //+kubebuilder:rbac:groups=hypershift.openshift.io,resources=controlplanecomponents;hostedclusters;nodepools,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get;list
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets,verbs=get;list;watch
 
 // Reconcile is the main state machine loop for HostedClusterUpgrade.
 func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -915,7 +916,8 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 				}
 			}
 			metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), npVer, targetVer).Set(blocked)
-			replicas, upgraded, readyNodes := GetNodePoolNodeCounts(&np, hcu.Spec.TargetReleaseImage)
+			assessment, assessmentErr := r.assessWorker(ctx, &np, hcu.Name, hcu.Spec.TargetReleaseImage)
+			replicas, upgraded, readyNodes := assessment.total, assessment.updated, assessment.ready
 			total += replicas
 			updated += upgraded
 			ready += readyNodes
@@ -926,8 +928,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 						continue
 					}
 					status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
-					image, _, _ := unstructured.NestedString(np.Object, "spec", "release", "image")
-					if image == hcu.Spec.TargetReleaseImage && npVer == targetVer && !isNodePoolUpdatingVersion(&np) && upgraded >= replicas && readyNodes >= replicas {
+					if assessmentErr == nil && assessment.complete {
 						status.Phase = "Completed"
 						status.StartTime = nil
 						status.Blockers = nil
@@ -1025,11 +1026,16 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	targetReleaseImage := hcu.Spec.TargetReleaseImage
 	targetVer, _ := upgradev1alpha1.ExtractVersion(targetReleaseImage)
 
+	assessments := make(map[string]workerAssessment, len(clusterNodePools))
 	for _, np := range clusterNodePools {
-		tot, upd, rdy := GetNodePoolNodeCounts(&np, targetReleaseImage)
-		totalReplicasSum += tot
-		updatedReplicasSum += upd
-		readyReplicasSum += rdy
+		a, err := r.assessWorker(ctx, &np, hcu.Name, targetReleaseImage)
+		if err != nil {
+			return false, 0, err
+		}
+		assessments[np.GetName()] = a
+		totalReplicasSum += a.total
+		updatedReplicasSum += a.updated
+		readyReplicasSum += a.ready
 	}
 
 	hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{
@@ -1162,19 +1168,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		activeUpgrades := 0
 		for _, np := range pools {
 			npSpecRelease, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
-			var npVer string
-			if np.version != "" {
-				npVer, _ = upgradev1alpha1.ExtractVersion(np.version)
-			} else if npSpecRelease != "" {
-				npVer, _ = upgradev1alpha1.ExtractVersion(npSpecRelease)
-			}
-			rCount, uCount, rdyCount := GetNodePoolNodeCounts(&np.object, targetReleaseImage)
-			updVer := isNodePoolUpdatingVersion(&np.object)
-			isDone := npSpecRelease == targetReleaseImage &&
-				npVer != "" &&
-				npVer == targetVer &&
-				!updVer &&
-				(rCount == 0 || (uCount >= rCount && rdyCount >= rCount))
+			isDone := assessments[np.name].complete
 
 			if npSpecRelease == targetReleaseImage && np.pausedUntil != "true" && !np.paused && np.pauseErr == nil && !isDone {
 				activeUpgrades++
@@ -1185,8 +1179,8 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 		for _, np := range pools {
 			startTime := hcuStatuses[idx].StartTime
-			replicas, updatedReplicas, readyReplicas := GetNodePoolNodeCounts(&np.object, targetReleaseImage)
-			updatingVersion := isNodePoolUpdatingVersion(&np.object)
+			assessment := assessments[np.name]
+			replicas, updatedReplicas, readyReplicas := assessment.total, assessment.updated, assessment.ready
 
 			npSpecRelease, _, _ := unstructured.NestedString(np.object.Object, "spec", "release", "image")
 			var npVer string
@@ -1205,11 +1199,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			reqLogger.Info("Evaluating NodePool specs", "name", np.name, "group", grpName, "npVer", npVer, "targetVer", targetVer, "pausedUntil", np.pausedUntil)
 
 			// Completion requires the expected version and every desired node updated and ready.
-			isUpgraded := npSpecRelease == targetReleaseImage &&
-				npVer != "" &&
-				npVer == targetVer &&
-				!updatingVersion &&
-				(replicas == 0 || (updatedReplicas >= replicas && readyReplicas >= replicas))
+			isUpgraded := assessment.complete
 
 			if np.pauseErr != nil {
 				pauseBlocked = true
@@ -1291,6 +1281,9 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 
 						// Run HCCO container log scraping to trace blocked drains
 						blockers = r.scrapeHCCOLogsForDrains(ctx, hcu.Namespace, hcu.Name, np.name)
+						if assessment.reason != "" {
+							blockers = append(blockers, assessment.reason)
+						}
 					} else {
 						// Concurrency throttled. Wait in queue.
 						phase = "WaitingForConcurrency"
