@@ -4,9 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -19,6 +22,13 @@ func readyHCP(hc *unstructured.Unstructured) *unstructured.Unstructured {
 	image, _, _ := unstructured.NestedString(hc.Object, "spec", "release", "image")
 	_ = unstructured.SetNestedField(hcp.Object, image, "spec", "releaseImage")
 	return hcp
+}
+
+func addReadyCP(c *regressionClient, hc *unstructured.Unstructured) {
+	_, version := GetHostedClusterCurrentRelease(hc)
+	cpc := readyStepCPC(version)
+	cpc.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+	c.objects = append(c.objects, readyHCP(hc), cpc)
 }
 
 func TestControlPlaneInFlightIdentity(t *testing.T) {
@@ -89,5 +99,67 @@ func TestControlPlaneOverrideRecovery(t *testing.T) {
 		if got.Status.Phase != upgradev1alpha1.PhaseBlocked || c.writes != 0 {
 			t.Fatalf("override must block without downstream writes: phase=%s writes=%d", got.Status.Phase, c.writes)
 		}
+	}
+}
+
+func TestControlPlaneRechecksPreviousHop(t *testing.T) {
+	for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhasePreflightChecks, upgradev1alpha1.PhaseUpgradingControlPlane} {
+		for _, defect := range []string{"CPC", "HCP", "health", "paused worker"} {
+			t.Run(string(phase)+"/"+defect, func(t *testing.T) {
+				hcu := regressionHCU(phase)
+				hcu.Spec.TargetReleaseImage = regressionImage("4.22.0")
+				hcu.Spec.IntermediateReleaseImage = regressionImage("4.21.0")
+				hc := regressionHC("4.21.0")
+				np := regressionNP("workers", "")
+				md := readyWorkerFixture(np, regressionImage("4.20.0"))
+				c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+				addReadyCP(c, hc)
+				switch defect {
+				case "CPC":
+					_ = unstructured.SetNestedField(c.objects[5].(*unstructured.Unstructured).Object, int64(0), "status", "observedGeneration")
+				case "HCP":
+					c.objects[4].SetGeneration(2)
+				case "health":
+					_ = unstructured.SetNestedSlice(hc.Object, nil, "status", "conditions")
+				case "paused worker":
+					_ = unstructured.SetNestedField(np.Object, "true", "spec", "pausedUntil")
+					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"type": "UpdatingConfig", "status": "True"}}, "status", "conditions")
+				}
+				r := &HostedClusterUpgradeReconciler{Client: c, ReleaseResolver: fixtureReleaseResolver{}}
+				_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)})
+				if c.writes != 0 {
+					t.Fatalf("degraded prerequisite allowed locks or CP mutation: %d writes", c.writes)
+				}
+			})
+		}
+	}
+}
+
+func TestWorkersRecheckControlPlaneAfterSchedule(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
+	future := metav1.NewTime(time.Now().Add(time.Hour))
+	hcu.Spec.NodePoolGroups = []upgradev1alpha1.NodePoolGroupSpec{{Name: "default", StartAt: &future}}
+	hc := regressionHC("4.21.0")
+	a, b := regressionNP("active", ""), regressionNP("waiting", "")
+	_ = unstructured.SetNestedField(a.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: a.GetName(), Phase: "Upgrading", TargetReleaseImage: hcu.Spec.TargetReleaseImage}}
+	c := &regressionClient{objects: append([]client.Object{a}, quiescentWorkerFixtures(b)...)}
+	addReadyCP(c, hc)
+	r := &HostedClusterUpgradeReconciler{Client: c}
+	if _, _, err := r.reconcileNodePools(context.Background(), hcu, hc); err != nil {
+		t.Fatal(err)
+	}
+	before := c.writes
+	hcu.Spec.NodePoolGroups[0].StartAt = nil
+	// The CP degrades while the later worker waits for its schedule.
+	c.objects[len(c.objects)-2].SetGeneration(2)
+	if _, _, err := r.reconcileNodePools(context.Background(), hcu, hc); err != nil {
+		t.Fatal(err)
+	}
+	if c.writes != before {
+		t.Fatal("CP degradation actuated new work or paused an active worker")
+	}
+	if pause, _, _ := unstructured.NestedString(a.Object, "spec", "pausedUntil"); pause != "" {
+		t.Fatal("active worker paused")
 	}
 }

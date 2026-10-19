@@ -22,6 +22,7 @@ func TestPauseResumeKeepsActiveWorkerRollouts(t *testing.T) {
 	paused := "true"
 	hcu.Spec.PausedUntil = &paused
 	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	got := reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhasePaused || c.writes != 0 {
 		t.Fatalf("coordinator pause mutated underlying resources: phase=%s writes=%d", got.Status.Phase, c.writes)
@@ -62,6 +63,8 @@ func TestPausedTargetChangeUpgradesControlPlaneFirst(t *testing.T) {
 	hcu.Spec.PausedUntil = &paused
 	np := regressionNP("workers", "")
 	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np}}
+	c.objects = append(c.objects, readyWorkerFixture(np, regressionImage("4.20.0")))
+	addReadyCP(c, regressionHC("4.21.0"))
 	got := reconcileRegression(t, c)
 	got.Spec.TargetReleaseImage = regressionImage("4.22.0")
 	got.Spec.PausedUntil = nil
@@ -93,6 +96,7 @@ func TestChangedActivePlanRespectsControlPlaneSchedule(t *testing.T) {
 	hcu.Spec.ControlPlane.StartAt = &future
 	hc := regressionHC("4.21.0")
 	c := &regressionClient{objects: []client.Object{hcu, hc}}
+	addReadyCP(c, hc)
 	for range 2 {
 		got := reconcileRegression(t, c)
 		if got.Status.Phase != upgradev1alpha1.PhasePendingSchedule {

@@ -445,8 +445,20 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Ensure all NodePools are locked before progressing past preflight
-		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
-			return ctrl.Result{}, fmt.Errorf("lock NodePools during preflight: %w", err)
+		baseline, _ := GetHostedClusterCurrentRelease(uHC)
+		desired, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+		if samePayload(baseline, desired) {
+			if err := r.verifyControlPlane(ctx, hcu, uHC, baseline); err != nil {
+				hcu.Status.Message = fmt.Sprintf("Preflight CP prerequisite: %v", err)
+				stateRequeueAfter = 10 * time.Second
+				break
+			}
+			if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
+				return ctrl.Result{}, fmt.Errorf("worker prerequisite before locks: %w", err)
+			}
+			if err := r.lockClusterNodePools(ctx, hcu); err != nil {
+				return ctrl.Result{}, fmt.Errorf("lock NodePools during preflight: %w", err)
+			}
 		}
 
 		hcu.Status.Phase = upgradev1alpha1.PhasePendingSchedule
@@ -527,8 +539,20 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Apply the version change on the HostedCluster spec!
+		baseline, _ := GetHostedClusterCurrentRelease(uHC)
+		if err := r.verifyControlPlane(ctx, hcu, uHC, baseline); err != nil {
+			hcu.Status.Message = fmt.Sprintf("Previous CP prerequisite: %v", err)
+			stateRequeueAfter = 10 * time.Second
+			break
+		}
+		if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
+			return ctrl.Result{}, fmt.Errorf("worker prerequisite before CP change: %w", err)
+		}
 		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
 			return ctrl.Result{}, fmt.Errorf("lock NodePools during CP upgrade: %w", err)
+		}
+		if err := r.WorkerPrerequisite(ctx, hcu); err != nil {
+			return ctrl.Result{}, fmt.Errorf("worker prerequisite immediately before CP change: %w", err)
 		}
 		reqLogger.Info("Applying version change on HostedCluster spec", "step", stepLabel, "image", nextReleaseImage)
 		err = unstructured.SetNestedField(uHC.Object, nextReleaseImage, "spec", "release", "image")
@@ -984,6 +1008,10 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	reqLogger.Info("Retrieved associated NodePools", "totalCount", len(clusterNodePools))
 
 	if len(clusterNodePools) == 0 {
+		if err := r.verifyControlPlane(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage); err != nil {
+			hcu.Status.Message = err.Error()
+			return true, 10 * time.Second, nil
+		}
 		hcu.Status.NodePoolStatuses = nil
 		hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{}
 		// No node pools associated with this cluster. Transition directly to Completed!
@@ -1103,6 +1131,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	// external rollout is not cancelled by writing a lock, and must not be queued
 	// as if it were idle. Unknown evidence is conservatively outstanding work.
 	externalWork := make(map[string]bool)
+	cpPrerequisiteErr := r.verifyControlPlane(ctx, hcu, uHC, targetReleaseImage)
 	for group, pools := range groupPoolsMap {
 		for i := range pools {
 			np := &pools[i]
@@ -1127,7 +1156,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 				externalWork[np.name] = true
 				continue
 			}
-			if !np.ownedLock && !strings.EqualFold(strings.TrimSpace(np.pausedUntil), "true") {
+			if cpPrerequisiteErr == nil && !np.ownedLock && !strings.EqualFold(strings.TrimSpace(np.pausedUntil), "true") {
 				pause, _, _ := nodePoolPause(&np.object, hcu)
 				if err := r.acquireWorkerLock(ctx, hcu, &np.object, pause); err != nil {
 					return false, 0, err
@@ -1240,7 +1269,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			var blockers []string
 
 			// Re-run preflight checks immediately before triggering upgrades
-			_, preflightErr := r.checkClusterInstallingAndHealth(uHC)
+			preflightErr := r.verifyControlPlane(ctx, hcu, uHC, targetReleaseImage)
 
 			reqLogger.Info("Evaluating NodePool specs", "name", np.name, "group", grpName, "npVer", npVer, "targetVer", targetVer, "pausedUntil", np.pausedUntil)
 

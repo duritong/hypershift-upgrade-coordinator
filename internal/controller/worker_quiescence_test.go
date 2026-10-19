@@ -16,6 +16,7 @@ func TestWorkerPrerequisiteRequiresQuiescenceAfterLock(t *testing.T) {
 	np.SetGeneration(5)
 	md := readyWorkerFixture(np, regressionImage("4.20.0"))
 	c := &regressionClient{objects: []client.Object{np, md}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.WorkerPrerequisite(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -64,6 +65,7 @@ func TestWorkerDynamicEnrollmentLocksQuiescentPools(t *testing.T) {
 	mdA := readyWorkerFixture(a, regressionImage("4.20.0"))
 	mdLater := readyWorkerFixture(later, regressionImage("4.20.0"))
 	c := &regressionClient{objects: []client.Object{a, later, mdA, mdLater}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
@@ -85,6 +87,7 @@ func TestWorkerExternalRolloutBlocksNewWorkAcrossGroups(t *testing.T) {
 	_ = unstructured.SetNestedField(external.Object, regressionImage("4.20.1"), "spec", "release", "image")
 	_ = unstructured.SetNestedSlice(external.Object, []interface{}{map[string]interface{}{"type": "UpdatingVersion", "status": "True"}}, "status", "conditions")
 	c := &regressionClient{objects: []client.Object{a, external, md}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
@@ -108,6 +111,7 @@ func TestWorkerKnownRolloutWithExternalSpecChangeBlocksNewWork(t *testing.T) {
 	a, b := regressionNP("a", ""), regressionNP("b", "")
 	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "a", Phase: "Upgrading", TargetReleaseImage: hcu.Spec.TargetReleaseImage}}
 	c := &regressionClient{objects: append([]client.Object{a}, quiescentWorkerFixtures(b)...)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)

@@ -19,6 +19,7 @@ func TestWorkerUserPauses(t *testing.T) {
 			np := regressionNP("workers", "")
 			_ = unstructured.SetNestedField(np.Object, pause, "spec", "pausedUntil")
 			c := &regressionClient{objects: quiescentWorkerFixtures(np)}
+			addReadyCP(c, regressionHC("4.21.0"))
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if pause == "true" {
 				if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
@@ -69,6 +70,9 @@ func TestWorkerLockFailureStopsControlPlane(t *testing.T) {
 				hcu := regressionHCU(phase)
 				hcu.UID = "upgrade-uid"
 				base := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0"), regressionNP("workers", "")}}
+				addReadyCP(base, regressionHC("4.20.0"))
+				np := base.objects[2].(*unstructured.Unstructured)
+				base.objects = append(base.objects, readyWorkerFixture(np, regressionImage("4.20.0")))
 				r := &HostedClusterUpgradeReconciler{Client: &workerLockFailureClient{regressionClient: base, failList: failList}, ReleaseResolver: fixtureReleaseResolver{}}
 				if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}); err == nil {
 					t.Fatal("lock failure did not propagate")
@@ -92,6 +96,7 @@ func TestWorkerLockOwnershipChanges(t *testing.T) {
 			hcu.UID = "upgrade-uid"
 			np := regressionNP("workers", "")
 			c := &regressionClient{objects: []client.Object{np}}
+			addReadyCP(c, regressionHC("4.21.0"))
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 				t.Fatal(err)
@@ -143,6 +148,7 @@ func TestWorkerTimedPauseExpiresDuringControlPlane(t *testing.T) {
 	original := time.Now().Add(2 * time.Second).UTC().Format(time.RFC3339)
 	_ = unstructured.SetNestedField(np.Object, original, "spec", "pausedUntil")
 	c := &regressionClient{objects: quiescentWorkerFixtures(np)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -189,6 +195,7 @@ func TestWorkerLockRestoresOriginal(t *testing.T) {
 					_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
 				}
 				c := &regressionClient{objects: quiescentWorkerFixtures(np)}
+				addReadyCP(c, regressionHC("4.21.0"))
 				r := &HostedClusterUpgradeReconciler{Client: c}
 				if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 					t.Fatal(err)
@@ -237,6 +244,7 @@ func TestWorkerCompletedUserPauseUnchanged(t *testing.T) {
 			_ = unstructured.SetNestedField(np.Object, pause, "spec", "pausedUntil")
 			md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
 			c := &regressionClient{objects: []client.Object{np, md}}
+			addReadyCP(c, regressionHC("4.21.0"))
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)
@@ -254,6 +262,7 @@ func TestWorkerLocksRespectGroupAndConcurrency(t *testing.T) {
 	hcu.Spec.NodePoolGroups = []upgradev1alpha1.NodePoolGroupSpec{{Name: "first"}}
 	a, b, later := regressionNP("a", "first"), regressionNP("b", "first"), regressionNP("later", "")
 	c := &regressionClient{objects: quiescentWorkerFixtures(a, b, later)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -285,6 +294,7 @@ func TestWorkerUserUnpauseDoesNotInventStepStart(t *testing.T) {
 	hcu.UID = "upgrade-uid"
 	np := regressionNP("workers", "")
 	c := &regressionClient{objects: []client.Object{np}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -312,6 +322,7 @@ func TestWorkerFuturePauseCannotHidePreexistingRollout(t *testing.T) {
 	_ = unstructured.SetNestedField(paused.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
 	_ = unstructured.SetNestedField(paused.Object, time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "spec", "pausedUntil")
 	c := &regressionClient{objects: append([]client.Object{paused}, quiescentWorkerFixtures(other)...)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
@@ -339,6 +350,7 @@ func TestWorkerCoordinatorPauseLeavesOwnedCompletedLock(t *testing.T) {
 	_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"ocpVersion": "4.21.0", "readyNodeCount": int64(1)}}, "status", "nodesInfo", "nodeVersions")
 	md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
 	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.21.0"), np, md}}
+	addReadyCP(c, regressionHC("4.21.0"))
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	if err := r.lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)

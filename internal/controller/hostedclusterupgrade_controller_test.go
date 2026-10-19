@@ -864,6 +864,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
+			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			futureTime := metav1.NewTime(time.Now().Add(2 * time.Hour))
@@ -1207,12 +1208,15 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			clusterName := "lock-np-cluster"
 
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
+			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create NodePool with pausedUntil: "false"
 			np := createAndSetStatusNodePool(ctx, "lock-target-pool", namespace, clusterName, regressionImage("4.20.44"))
 			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, np)).To(Succeed())
+			setReadyNodePoolStatus(np, "4.20.44")
+			Expect(k8sClient.Status().Update(ctx, np)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, np) }()
 
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
@@ -1322,6 +1326,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 		It("restores worker locks before deletion and permits recreating an upgrade", func() {
 			clusterName := "deletion-cleanup"
 			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.0"))
+			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 			np := createAndSetStatusNodePool(ctx, "deletion-worker", namespace, clusterName, regressionImage("4.20.0"))
 			defer func() { _ = k8sClient.Delete(ctx, np) }()
@@ -1335,6 +1340,9 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			}
 			var previousUID types.UID
 			for range 2 {
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: np.GetName()}, np)).To(Succeed())
+				setReadyNodePoolStatus(np, "4.20.0")
+				Expect(k8sClient.Status().Update(ctx, np)).To(Succeed())
 				hcu := template.DeepCopy()
 				Expect(k8sClient.Create(ctx, hcu)).To(Succeed())
 				Expect(hcu.UID).NotTo(Equal(previousUID))

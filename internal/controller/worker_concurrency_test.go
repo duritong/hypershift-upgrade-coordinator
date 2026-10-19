@@ -25,6 +25,7 @@ func TestWorkerOutstandingWorkReservesConcurrency(t *testing.T) {
 			started := metav1.NewTime(time.Now().Add(-time.Hour))
 			hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{{Name: "a", Phase: "Upgrading", TargetReleaseImage: image, StartTime: &started}}
 			c := &regressionClient{objects: append([]client.Object{a}, quiescentWorkerFixtures(b)...)}
+			addReadyCP(c, regressionHC("4.21.0"))
 			r := &HostedClusterUpgradeReconciler{Client: c}
 			if _, _, err := r.reconcileNodePools(context.Background(), hcu, regressionHC("4.21.0")); err != nil {
 				t.Fatal(err)

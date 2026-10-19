@@ -61,6 +61,7 @@ func TestStepMetricsExcludeScheduling(t *testing.T) {
 	future := metav1.NewTime(time.Now().Add(time.Hour))
 	hcu.Spec.ControlPlane.StartAt = &future
 	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0")}}
+	addReadyCP(c, regressionHC("4.20.0"))
 	reconcileRegression(t, c)
 	if got := collectedGauges(t, metricStepDuration); len(got) != 0 {
 		t.Fatalf("scheduled upgrade exposes an active step: %v", got)
@@ -104,6 +105,7 @@ func TestControlPlaneStepTimerLifecycle(t *testing.T) {
 	overall := metav1.NewTime(time.Now().Add(-time.Hour))
 	hcu.Status.StartTime = &overall
 	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0")}}
+	addReadyCP(c, regressionHC("4.20.0"))
 	got := reconcileRegression(t, c)
 	if got.Status.ControlPlaneStatus.StartTime != nil || len(collectedGauges(t, metricStepDuration)) != 0 {
 		t.Fatal("opening the schedule started a timer before actuation")
@@ -111,7 +113,7 @@ func TestControlPlaneStepTimerLifecycle(t *testing.T) {
 	before := time.Now().Add(-time.Second)
 	got = reconcileRegression(t, c)
 	if start := got.Status.ControlPlaneStatus.StartTime; start == nil || start.Time.Before(before) {
-		t.Fatalf("actuation did not persist a new timer: %+v", got.Status.ControlPlaneStatus)
+		t.Fatalf("actuation did not persist a new timer: %+v (%s)", got.Status.ControlPlaneStatus, got.Status.Message)
 	}
 	assertStepSeconds(t, "ControlPlane", 0)
 	started := metav1.NewTime(time.Now().Add(-90 * time.Second))
@@ -153,8 +155,12 @@ func TestControlPlaneStepTimerLifecycle(t *testing.T) {
 	if err := c.store(regressionHC("4.21.0")); err != nil {
 		t.Fatal(err)
 	}
-	c.objects = append(c.objects, readyStepCPC("4.21.0"))
-	c.objects = append(c.objects, readyHCP(regressionHC("4.21.0")))
+	if err := c.store(readyStepCPC("4.21.0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.store(readyHCP(regressionHC("4.21.0"))); err != nil {
+		t.Fatal(err)
+	}
 	got = reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhaseUpgradingControlPlane || got.Status.ControlPlaneStatus.StartTime != nil || len(collectedGauges(t, metricStepDuration)) != 0 {
 		t.Fatalf("intermediate verification retained the timer: %+v", got.Status)
@@ -186,6 +192,7 @@ func TestNodePoolStepTimersPersistAndCompleteIndependently(t *testing.T) {
 	overall := metav1.NewTime(time.Now().Add(-time.Hour))
 	hcu.Status.StartTime = &overall
 	c := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	got := reconcileRegression(t, c)
 	if len(got.Status.NodePoolStatuses) != 2 {
 		t.Fatalf("unexpected statuses: %+v", got.Status)
@@ -308,6 +315,7 @@ func TestStaleUpgradeGaugesAndDeletion(t *testing.T) {
 	metricNodePoolRolloutRatio.WithLabelValues("clusters", "example", "gone").Set(0.5)
 	metricAggregatedNodeRolloutRatio.WithLabelValues("clusters", "example").Set(0.5)
 	c := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("workers", ""))...)}
+	addReadyCP(c, regressionHC("4.21.0"))
 	got := reconcileRegression(t, c)
 	if len(got.Status.NodePoolStatuses) != 1 || got.Status.NodePoolStatuses[0].Name != "workers" {
 		t.Fatalf("disappeared pool retained status: %+v", got.Status.NodePoolStatuses)
@@ -423,6 +431,7 @@ func TestNodePoolStepTimerSurvivesLaterUpdateFailure(t *testing.T) {
 	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingNodePools)
 	hcu.Spec.RolloutPolicy = &upgradev1alpha1.RolloutPolicySpec{MaxParallelNodePools: 2}
 	base := &regressionClient{objects: append([]client.Object{hcu, regressionHC("4.21.0")}, quiescentWorkerFixtures(regressionNP("a", ""), regressionNP("b", ""))...)}
+	addReadyCP(base, regressionHC("4.21.0"))
 	if err := (&HostedClusterUpgradeReconciler{Client: base}).lockClusterNodePools(context.Background(), hcu); err != nil {
 		t.Fatal(err)
 	}

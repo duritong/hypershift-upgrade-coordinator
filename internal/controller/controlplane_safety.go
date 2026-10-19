@@ -89,7 +89,11 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlane(ctx context.Context,
 	}
 	version, err := upgradev1alpha1.ExtractVersion(image)
 	if err != nil {
-		return err
+		baseline, baselineVersion := GetHostedClusterCurrentRelease(hc)
+		if !samePayload(baseline, image) || baselineVersion == "" {
+			return err
+		}
+		version = baselineVersion
 	}
 	desired, _, _ := unstructured.NestedString(hc.Object, "spec", "release", "image")
 	if !samePayload(desired, image) {

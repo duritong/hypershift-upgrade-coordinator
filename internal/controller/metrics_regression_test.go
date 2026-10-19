@@ -27,7 +27,8 @@ func TestComponentReadinessMetrics(t *testing.T) {
 	cpc.SetGroupVersionKind(gvkCPC)
 	cpc.SetNamespace("clusters-example")
 	cpc.SetName("etcd")
-	c := &regressionClient{objects: []client.Object{cpc}}
+	_ = unstructured.SetNestedField(cpc.Object, int64(1), "status", "observedGeneration")
+	c := &regressionClient{objects: []client.Object{cpc, readyHCP(regressionHC("4.21.0"))}}
 	r := &HostedClusterUpgradeReconciler{Client: c}
 	for _, tt := range []struct {
 		available, complete, version string
