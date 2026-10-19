@@ -81,9 +81,11 @@ func createAndSetStatusHostedCluster(ctx context.Context, name, namespace, relea
 	_ = unstructured.SetNestedSlice(hc.Object, history, "status", "version", "history")
 	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{}, "status", "version", "availableUpdates")
 	_ = unstructured.SetNestedField(hc.Object, int64(1), "status", "version", "observedGeneration")
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"desired": desired, "history": history, "observedGeneration": int64(1)}, "status", "controlPlaneVersion")
 	setHealthyHostedClusterStatus(hc)
 
 	Expect(k8sClient.Status().Update(ctx, hc)).To(Succeed())
+	attachReadyHCP(ctx, hc)
 
 	return hc
 }
@@ -149,9 +151,10 @@ func setReadyNodePoolStatus(np *unstructured.Unstructured, version string) {
 }
 
 func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured) {
+	attachReadyHCP(ctx, hc)
 	ns := &unstructured.Unstructured{}
 	ns.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
-	ns.SetName(hc.GetNamespace() + "-" + hc.GetName())
+	ns.SetName(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
 	if err := k8sClient.Create(ctx, ns); err != nil {
 		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
 	}
@@ -164,6 +167,7 @@ func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured)
 	DeferCleanup(func() { _ = k8sClient.Delete(ctx, cpc) })
 	_, version := GetHostedClusterCurrentRelease(hc)
 	_ = unstructured.SetNestedField(cpc.Object, version, "status", "version")
+	_ = unstructured.SetNestedField(cpc.Object, int64(1), "status", "observedGeneration")
 	conditions := []interface{}{}
 	for _, typ := range []string{"Available", "RolloutComplete"} {
 		conditions = append(conditions, map[string]interface{}{
@@ -173,6 +177,36 @@ func createReadyControlPlane(ctx context.Context, hc *unstructured.Unstructured)
 	}
 	_ = unstructured.SetNestedSlice(cpc.Object, conditions, "status", "conditions")
 	Expect(k8sClient.Status().Update(ctx, cpc)).To(Succeed())
+}
+
+// attachReadyHCP explicitly simulates management-side observation of the HC
+// request. Tests call it only when simulating a completed management rollout.
+func attachReadyHCP(ctx context.Context, hc *unstructured.Unstructured) {
+	hcp := readyHCP(hc)
+	ns := &unstructured.Unstructured{}
+	ns.SetAPIVersion("v1")
+	ns.SetKind("Namespace")
+	ns.SetName(hcp.GetNamespace())
+	if err := k8sClient.Create(ctx, ns); err != nil {
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+	}
+	old := &unstructured.Unstructured{}
+	old.SetGroupVersionKind(gvkHCP)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: hcp.GetNamespace(), Name: hcp.GetName()}, old); apierrors.IsNotFound(err) {
+		Expect(k8sClient.Create(ctx, hcp)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, hcp) })
+	} else {
+		Expect(err).NotTo(HaveOccurred())
+		hcp.SetResourceVersion(old.GetResourceVersion())
+		Expect(k8sClient.Update(ctx, hcp)).To(Succeed())
+	}
+	history, _, _ := unstructured.NestedSlice(hc.Object, "status", "version", "history")
+	_ = unstructured.SetNestedSlice(hc.Object, history, "status", "controlPlaneVersion", "history")
+	image, _, _ := unstructured.NestedString(hc.Object, "spec", "release", "image")
+	version, _ := upgradev1alpha1.ExtractVersion(image)
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"image": image, "version": version}, "status", "controlPlaneVersion", "desired")
+	_ = unstructured.SetNestedField(hc.Object, hcp.GetGeneration(), "status", "controlPlaneVersion", "observedGeneration")
+	Expect(k8sClient.Status().Update(ctx, hc)).To(Succeed())
 }
 
 var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
@@ -198,7 +232,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
 			// 1. Create target HostedCluster
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 
 			defer func() {
 				_ = k8sClient.Delete(ctx, uHC)
@@ -211,7 +245,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					Namespace: namespace,
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 				},
@@ -237,6 +271,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			_ = k8sClient.Create(ctx, ns)
 
 			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, int64(1), "status", "observedGeneration")
 
 			err := unstructured.SetNestedField(uCPC.Object, "4.20.44", "status", "version")
 			Expect(err).NotTo(HaveOccurred())
@@ -277,7 +312,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				val, _, _ := unstructured.NestedString(fetchedHC.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.20.50")))
 		})
 
 		It("should enter paused phase when spec.pausedUntil is true but still continuously aggregate status", func() {
@@ -293,7 +328,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					Namespace: namespace,
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.22.2"),
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					PausedUntil:        &pausedVal,
@@ -329,6 +364,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			_ = k8sClient.Create(ctx, ns)
 
 			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, int64(1), "status", "observedGeneration")
 
 			err := unstructured.SetNestedField(uCPC.Object, "4.21.0", "status", "version")
 			Expect(err).NotTo(HaveOccurred())
@@ -366,7 +402,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			testLogScraper.MockLogs = "2026-08-12T12:00:00Z failed to drain node pool-b-node-1: cannot evict pod db-pod due to PDB db-pdb"
 
 			// 1. Create target HostedCluster already at target version to bypass CP upgrade step
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.22.2"))
 			createReadyControlPlane(ctx, uHC)
 
 			defer func() {
@@ -374,7 +410,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			}()
 
 			// 2. Create mock NodePools associated with this cluster using semantic version strings
-			npA := createAndSetStatusNodePool(ctx, "pool-a", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			npA := createAndSetStatusNodePool(ctx, "pool-a", namespace, clusterName, regressionImage("4.20.44"))
 			npA.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "infra",
 			})
@@ -385,7 +421,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Delete(ctx, npA)
 			}()
 
-			npB := createAndSetStatusNodePool(ctx, "pool-b", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			npB := createAndSetStatusNodePool(ctx, "pool-b", namespace, clusterName, regressionImage("4.20.44"))
 			npB.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "compute",
 			})
@@ -396,7 +432,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Delete(ctx, npB)
 			}()
 
-			npC := createAndSetStatusNodePool(ctx, "pool-c", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			npC := createAndSetStatusNodePool(ctx, "pool-c", namespace, clusterName, regressionImage("4.20.44"))
 			npC.SetLabels(map[string]string{
 				"upgrade.huc.0xshift.dev/group": "compute",
 			})
@@ -407,7 +443,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Delete(ctx, npC)
 			}()
 
-			npD := createAndSetStatusNodePool(ctx, "pool-d", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			npD := createAndSetStatusNodePool(ctx, "pool-d", namespace, clusterName, regressionImage("4.20.44"))
 			_ = unstructured.SetNestedField(npD.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, npD)).To(Succeed())
 			for _, pool := range []*unstructured.Unstructured{npA, npB, npC, npD} {
@@ -426,7 +462,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					Namespace: namespace,
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.22.2"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					RolloutPolicy: &upgradev1alpha1.RolloutPolicySpec{
 						MaxParallelNodePools: 2,
@@ -455,7 +491,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-a", Namespace: namespace}, fetchedNP)
 				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.22.2")))
 
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
@@ -489,7 +525,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-b", Namespace: namespace}, fetchedNP)
 				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.22.2")))
 
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
@@ -497,7 +533,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-c", Namespace: namespace}, fetchedNP)
 				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.22.2")))
 
 			// Verify that fallback default group NodePool (pool-d) remains paused during compute rollout
 			Consistently(func() string {
@@ -542,7 +578,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-d", Namespace: namespace}, fetchedNP)
 				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.22.2")))
 
 			Eventually(func() string {
 				fetchedNP := &unstructured.Unstructured{}
@@ -558,12 +594,12 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
 			// HostedCluster at target version
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.22.2"))
 			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create a NodePool with status.version = "4.20.44" (semver string, NOT pullspec!)
-			np := createAndSetStatusNodePool(ctx, "pool-semver", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			np := createAndSetStatusNodePool(ctx, "pool-semver", namespace, clusterName, regressionImage("4.20.44"))
 			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
 			_ = unstructured.SetNestedField(np.Object, int64(3), "spec", "replicas")
 			Expect(k8sClient.Update(ctx, np)).To(Succeed())
@@ -593,7 +629,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					Namespace: namespace,
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.22.2"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -621,7 +657,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "pool-semver", Namespace: namespace}, fetchedNP)
 				val, _, _ := unstructured.NestedString(fetchedNP.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.22.2-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.22.2")))
 		})
 
 		It("Fix 2.B Test: should capture ControlPlaneComponent condition failure messages and handle degraded cluster state", func() {
@@ -637,7 +673,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			defer func() { _ = k8sClient.Delete(ctx, ns) }()
 
 			// HostedCluster
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// ControlPlaneComponent with Available = False and RolloutComplete = False with failure messages
@@ -647,6 +683,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			uCPC.SetNamespace(cpNamespace)
 
 			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, int64(1), "status", "observedGeneration")
 
 			_ = unstructured.SetNestedField(uCPC.Object, "4.20.44", "status", "version")
 
@@ -679,7 +716,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 					Namespace: namespace,
 				},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 				},
@@ -746,7 +783,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			defer func() { _ = k8sClient.Delete(ctx, ns) }()
 
 			// Create HostedCluster starting at 4.12.0
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.12.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.12.0"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create mock ControlPlaneComponent in ready state
@@ -755,6 +792,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			uCPC.SetName("etcd")
 			uCPC.SetNamespace(cpNamespace)
 			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, int64(1), "status", "observedGeneration")
 			_ = unstructured.SetNestedField(uCPC.Object, "4.12.0", "status", "version")
 			nowStr := time.Now().Format(time.RFC3339)
 			conds := []interface{}{
@@ -769,8 +807,8 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage:       "quay.io/ocp:4.14.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-					IntermediateReleaseImage: "quay.io/ocp:4.13.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage:       regressionImage("4.14.0"),
+					IntermediateReleaseImage: regressionImage("4.13.0"),
 					NodePoolGroups:           []upgradev1alpha1.NodePoolGroupSpec{},
 					ControlPlane:             upgradev1alpha1.ControlPlaneUpgradeSpec{},
 				},
@@ -787,24 +825,26 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				val, _, _ := unstructured.NestedString(fetchedHC.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.13.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.13.0")))
 
 			// Simulate HostedCluster status version reaching intermediate 4.13.0
 			fetchedHC := &unstructured.Unstructured{}
 			fetchedHC.SetGroupVersionKind(gvkHC)
 			Expect(k8sClient.Get(ctx, hcuKey, fetchedHC)).To(Succeed())
 
-			desired := map[string]interface{}{"image": "quay.io/ocp:4.13.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "version": "4.13.0"}
+			desired := map[string]interface{}{"image": regressionImage("4.13.0"), "version": "4.13.0"}
 			history := []interface{}{
-				map[string]interface{}{"image": "quay.io/ocp:4.13.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "version": "4.13.0", "state": "Completed", "verified": true, "startedTime": nowStr, "completionTime": nowStr},
+				map[string]interface{}{"image": regressionImage("4.13.0"), "version": "4.13.0", "state": "Completed", "verified": true, "startedTime": nowStr, "completionTime": nowStr},
 			}
 			_ = unstructured.SetNestedMap(fetchedHC.Object, desired, "status", "version", "desired")
 			_ = unstructured.SetNestedSlice(fetchedHC.Object, history, "status", "version", "history")
 			Expect(k8sClient.Status().Update(ctx, fetchedHC)).To(Succeed())
+			attachReadyHCP(ctx, fetchedHC)
 
 			// Simulate ControlPlaneComponent (etcd) completing rollout to intermediate 4.13.0
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "etcd", Namespace: cpNamespace}, uCPC)).To(Succeed())
 			_ = unstructured.SetNestedField(uCPC.Object, "4.13.0", "status", "version")
+			_ = unstructured.SetNestedField(uCPC.Object, int64(2), "status", "observedGeneration")
 			Expect(k8sClient.Status().Update(ctx, uCPC)).To(Succeed())
 
 			// Step 2: Coordinator should advance to target version (4.14.0)
@@ -816,14 +856,14 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				}
 				val, _, _ := unstructured.NestedString(fetchedHC2.Object, "spec", "release", "image")
 				return val
-			}, timeout, interval).Should(Equal("quay.io/ocp:4.14.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			}, timeout, interval).Should(Equal(regressionImage("4.14.0")))
 		})
 
 		It("should halt when ControlPlane.StartAt or NodePoolGroup.StartAt is in the future", func() {
 			clusterName := "future-sched-cluster"
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			futureTime := metav1.NewTime(time.Now().Add(2 * time.Hour))
@@ -831,7 +871,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane: upgradev1alpha1.ControlPlaneUpgradeSpec{
 						StartAt: &futureTime,
 					},
@@ -855,7 +895,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			clusterName := "degraded-cluster"
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Set Degraded = True condition on HostedCluster
@@ -874,7 +914,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -903,7 +943,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			_ = k8sClient.Create(ctx, ns)
 			defer func() { _ = k8sClient.Delete(ctx, ns) }()
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create CPC with Available=True, RolloutComplete=True, but version="4.20.44" (old version)
@@ -912,6 +952,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			uCPC.SetName("kube-apiserver")
 			uCPC.SetNamespace(cpNamespace)
 			Expect(k8sClient.Create(ctx, uCPC)).To(Succeed())
+			_ = unstructured.SetNestedField(uCPC.Object, int64(1), "status", "observedGeneration")
 			defer func() { _ = k8sClient.Delete(ctx, uCPC) }()
 
 			_ = unstructured.SetNestedField(uCPC.Object, "4.20.44", "status", "version")
@@ -926,7 +967,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -955,13 +996,14 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			// Simulate kube-apiserver completing rollout to 4.20.50
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kube-apiserver", Namespace: cpNamespace}, uCPC)).To(Succeed())
 			_ = unstructured.SetNestedField(uCPC.Object, "4.20.50", "status", "version")
+			_ = unstructured.SetNestedField(uCPC.Object, int64(2), "status", "observedGeneration")
 			Expect(k8sClient.Status().Update(ctx, uCPC)).To(Succeed())
 
 			// Simulate HostedCluster status reaching 4.20.50
 			Expect(k8sClient.Get(ctx, hcuKey, uHC)).To(Succeed())
 			history := []interface{}{
 				map[string]interface{}{
-					"image":          "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"image":          regressionImage("4.20.50"),
 					"version":        "4.20.50",
 					"state":          "Completed",
 					"verified":       true,
@@ -970,7 +1012,9 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				},
 			}
 			_ = unstructured.SetNestedSlice(uHC.Object, history, "status", "version", "history")
+			_ = unstructured.SetNestedMap(uHC.Object, map[string]interface{}{"image": regressionImage("4.20.50"), "version": "4.20.50"}, "status", "version", "desired")
 			Expect(k8sClient.Status().Update(ctx, uHC)).To(Succeed())
+			attachReadyHCP(ctx, uHC)
 
 			// Now UpgradedComponents must become 1 and CP upgrade advances!
 			Eventually(func() int32 {
@@ -990,7 +1034,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hc.SetGroupVersionKind(gvkHC)
 			hc.SetName(clusterName)
 			hc.SetNamespace(namespace)
-			_ = unstructured.SetNestedField(hc.Object, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "spec", "release", "image")
+			_ = unstructured.SetNestedField(hc.Object, regressionImage("4.20.44"), "spec", "release", "image")
 			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"type": "None"}, "spec", "platform")
 			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"name": "pull-secret"}, "spec", "pullSecret")
 			_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"managementType": "Managed", "managed": map[string]interface{}{"storage": map[string]interface{}{"type": "PersistentVolume"}}}, "spec", "etcd")
@@ -1013,7 +1057,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			nowStr := time.Now().Format(time.RFC3339)
 			history := []interface{}{
 				map[string]interface{}{
-					"image":          "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					"image":          regressionImage("4.20.44"),
 					"version":        "4.20.44",
 					"state":          "Partial",
 					"verified":       false,
@@ -1022,7 +1066,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 				},
 			}
 			desired := map[string]interface{}{
-				"image":   "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+				"image":   regressionImage("4.20.44"),
 				"version": "4.20.44",
 			}
 			_ = unstructured.SetNestedMap(hc.Object, desired, "status", "version", "desired")
@@ -1034,7 +1078,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -1057,22 +1101,22 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
 			// Cluster at target version so CP upgrade is bypassed
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.22.0"))
 			createReadyControlPlane(ctx, uHC)
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create 2 NodePools with pausedUntil: "" (not paused initially!)
-			np1 := createAndSetStatusNodePool(ctx, "c-pool-1", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			np1 := createAndSetStatusNodePool(ctx, "c-pool-1", namespace, clusterName, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, np1) }()
 
-			np2 := createAndSetStatusNodePool(ctx, "c-pool-2", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			np2 := createAndSetStatusNodePool(ctx, "c-pool-2", namespace, clusterName, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, np2) }()
 
 			// Create HCU with maxParallelNodePools: 1
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.22.0"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					RolloutPolicy: &upgradev1alpha1.RolloutPolicySpec{
 						MaxParallelNodePools: 1,
@@ -1113,11 +1157,11 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			clusterName := "unready-pool-cluster"
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.22.0"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// NodePool where spec is already target release, but readyNodeCount is 0!
-			np := createAndSetStatusNodePool(ctx, "unready-pool", namespace, clusterName, "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			np := createAndSetStatusNodePool(ctx, "unready-pool", namespace, clusterName, regressionImage("4.22.0"))
 			_ = unstructured.SetNestedField(np.Object, int64(3), "status", "replicas")
 			nodesInfo := map[string]interface{}{
 				"nodeVersions": []interface{}{
@@ -1136,7 +1180,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.22.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.22.0"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -1162,11 +1206,11 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 		It("Issue 1.5: should lock all NodePools (spec.pausedUntil=true) during Control Plane upgrade", func() {
 			clusterName := "lock-np-cluster"
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Create NodePool with pausedUntil: "false"
-			np := createAndSetStatusNodePool(ctx, "lock-target-pool", namespace, clusterName, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			np := createAndSetStatusNodePool(ctx, "lock-target-pool", namespace, clusterName, regressionImage("4.20.44"))
 			_ = unstructured.SetNestedField(np.Object, "false", "spec", "pausedUntil")
 			Expect(k8sClient.Update(ctx, np)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, np) }()
@@ -1174,7 +1218,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -1196,13 +1240,13 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			clusterName := "conditions-test-cluster"
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},
@@ -1238,7 +1282,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			clusterName := "cv-failing-cluster"
 			hcuKey := types.NamespacedName{Name: clusterName, Namespace: namespace}
 
-			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, "quay.io/ocp:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+			uHC := createAndSetStatusHostedCluster(ctx, clusterName, namespace, regressionImage("4.20.44"))
 			defer func() { _ = k8sClient.Delete(ctx, uHC) }()
 
 			// Set ClusterVersionFailing = True condition on HostedCluster
@@ -1257,7 +1301,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 			hcu := &upgradev1alpha1.HostedClusterUpgrade{
 				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: namespace},
 				Spec: upgradev1alpha1.HostedClusterUpgradeSpec{
-					TargetReleaseImage: "quay.io/ocp:4.20.50-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+					TargetReleaseImage: regressionImage("4.20.50"),
 					ControlPlane:       upgradev1alpha1.ControlPlaneUpgradeSpec{},
 					NodePoolGroups:     []upgradev1alpha1.NodePoolGroupSpec{},
 				},

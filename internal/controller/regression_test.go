@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"reflect"
 	"testing"
@@ -79,7 +80,7 @@ func (s regressionStatusWriter) Update(_ context.Context, obj client.Object, _ .
 }
 
 func regressionImage(version string) string {
-	return "quay.io/ocp:" + version + "-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	return fmt.Sprintf("quay.io/ocp:%s-x86_64@sha256:%x", version, sha256.Sum256([]byte(version)))
 }
 
 func regressionHC(version string) *unstructured.Unstructured {
@@ -91,6 +92,9 @@ func regressionHC(version string) *unstructured.Unstructured {
 	_ = unstructured.SetNestedSlice(u.Object, []interface{}{map[string]interface{}{
 		"state": "Completed", "version": version, "image": regressionImage(version),
 	}}, "status", "version", "history")
+	history, _, _ := unstructured.NestedSlice(u.Object, "status", "version", "history")
+	_ = unstructured.SetNestedSlice(u.Object, history, "status", "controlPlaneVersion", "history")
+	_ = unstructured.SetNestedField(u.Object, int64(1), "status", "controlPlaneVersion", "observedGeneration")
 	setHealthyHostedClusterStatus(u)
 	return u
 }

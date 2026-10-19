@@ -40,6 +40,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - hypershift.openshift.io
+  resources:
+  - hostedcontrolplanes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - upgrade.0xshift.dev
   resources:
   - hostedclusterupgrades

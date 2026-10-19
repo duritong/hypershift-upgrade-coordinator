@@ -210,6 +210,7 @@ func init() {
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/finalizers,verbs=update
 //+kubebuilder:rbac:groups=hypershift.openshift.io,resources=controlplanecomponents;hostedclusters;nodepools,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedcontrolplanes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get;list
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets,verbs=get;list;watch
@@ -505,41 +506,30 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			break
 		}
 
-		// Ensure all NodePools are locked during CP upgrade to protect version skew
-		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
-			return ctrl.Result{}, fmt.Errorf("lock NodePools during CP upgrade: %w", err)
-		}
-
 		_, currentVer := GetHostedClusterCurrentRelease(uHC)
 		targetVer, _ := upgradev1alpha1.ExtractVersion(hcu.Spec.TargetReleaseImage)
-
-		var nextReleaseImage string
-		var stepLabel string
-
-		if hcu.Spec.IntermediateReleaseImage != "" {
-			intImage := hcu.Spec.IntermediateReleaseImage
-			intVer, _ := upgradev1alpha1.ExtractVersion(intImage)
-
-			if upgradev1alpha1.IsUpstreamGreater(currentVer, intVer) {
-				nextReleaseImage = intImage
-				stepLabel = fmt.Sprintf("Intermediate (%s)", intVer)
-			}
+		nextReleaseImage, planErr := plannedControlPlaneRelease(uHC, hcu)
+		if planErr != nil {
+			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+			hcu.Status.Message = planErr.Error()
+			break
 		}
-
-		if nextReleaseImage == "" && upgradev1alpha1.IsUpstreamGreater(currentVer, targetVer) {
-			nextReleaseImage = hcu.Spec.TargetReleaseImage
-			stepLabel = fmt.Sprintf("Target (%s)", targetVer)
+		stepLabel := "Target"
+		if nextReleaseImage == hcu.Spec.IntermediateReleaseImage {
+			stepLabel = "Intermediate"
 		}
-
-		if nextReleaseImage == "" {
-			hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+		previousImage, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+		if samePayload(previousImage, nextReleaseImage) {
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = nextReleaseImage
 			hcu.Status.Phase = upgradev1alpha1.PhaseVerifyingControlPlane
-			hcu.Status.Message = "Hosted Control Plane is already at target version. Verifying component readiness."
+			hcu.Status.Message = "Adopting current HostedCluster release request. Verifying exact payload completion."
 			break
 		}
 
 		// Apply the version change on the HostedCluster spec!
-		previousImage, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+		if err := r.lockClusterNodePools(ctx, hcu); err != nil {
+			return ctrl.Result{}, fmt.Errorf("lock NodePools during CP upgrade: %w", err)
+		}
 		reqLogger.Info("Applying version change on HostedCluster spec", "step", stepLabel, "image", nextReleaseImage)
 		err = unstructured.SetNestedField(uHC.Object, nextReleaseImage, "spec", "release", "image")
 		if err != nil {
@@ -606,38 +596,8 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			break
 		}
 
-		currentRelease, currentVer := GetHostedClusterCurrentRelease(uHC)
-
-		// 1. Check if HostedCluster reports completion of expectedVer in history
-		hcVerCompleted := false
-		history, foundHist, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
-		if foundHist {
-			for _, item := range history {
-				hMap, ok := item.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				img, _ := hMap["image"].(string)
-				ver, _ := hMap["version"].(string)
-				state, _ := hMap["state"].(string)
-				if state == "Completed" {
-					if img == expectedRelease || ver == expectedVer {
-						hcVerCompleted = true
-						break
-					}
-					if ver != "" {
-						extV, _ := upgradev1alpha1.ExtractVersion(ver)
-						if extV == expectedVer || !upgradev1alpha1.IsUpstreamGreater(extV, expectedVer) {
-							hcVerCompleted = true
-							break
-						}
-					}
-				}
-			}
-		}
-
-		if !hcVerCompleted && currentRelease != expectedRelease && currentVer != expectedVer {
-			hcu.Status.Message = fmt.Sprintf("Waiting for HostedCluster status version (%s) to match expected target (%s).", currentVer, expectedVer)
+		if err := r.verifyControlPlane(ctx, hcu, uHC, expectedRelease); err != nil {
+			hcu.Status.Message = err.Error()
 			stateRequeueAfter = 10 * time.Second
 			break
 		}
@@ -1798,7 +1758,7 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 
 // aggregateControlPlaneStatus queries and copies the individual states of the ControlPlaneComponents.
 func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context.Context, hcu *upgradev1alpha1.HostedClusterUpgrade, expectedVer string) error {
-	cpNamespace := fmt.Sprintf("%s-%s", hcu.Namespace, hcu.Name)
+	cpNamespace := WorkerControlPlaneNamespace(hcu.Namespace, hcu.Name)
 	metricComponentReady.DeletePartialMatch(prometheus.Labels{"namespace": hcu.Namespace, "name": hcu.Name})
 
 	uList := &unstructured.UnstructuredList{}
@@ -1813,6 +1773,9 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 	}
 
 	components := make([]upgradev1alpha1.ControlPlaneComponentStatus, len(uList.Items))
+	hcp := &unstructured.Unstructured{}
+	hcp.SetGroupVersionKind(gvkHCP)
+	hcpErr := r.Get(ctx, client.ObjectKey{Namespace: cpNamespace, Name: hcu.Name}, hcp)
 	var upgradedCount int32
 	blockers := []string{}
 
@@ -1876,7 +1839,9 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 			versionMatches = (compVer == expectedVer)
 		}
 
-		if available && rolloutComplete && versionMatches {
+		observed, _, _ := unstructured.NestedInt64(item.Object, "status", "observedGeneration")
+		fresh := hcpErr == nil && hcp.GetGeneration() > 0 && observed >= hcp.GetGeneration()
+		if available && rolloutComplete && versionMatches && fresh {
 			upgradedCount++
 		} else {
 			blockDetail := compMsg
@@ -1890,7 +1855,7 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 		var readiness float64
 		if available {
 			readiness = 1
-			if rolloutComplete && versionMatches {
+			if rolloutComplete && versionMatches && fresh {
 				readiness = 2
 			}
 		}

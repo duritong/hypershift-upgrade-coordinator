@@ -87,6 +87,7 @@ func readyStepCPC(version string) *unstructured.Unstructured {
 	cpc.SetGroupVersionKind(gvkCPC)
 	cpc.SetNamespace("clusters-example")
 	cpc.SetName("etcd")
+	_ = unstructured.SetNestedField(cpc.Object, int64(1), "status", "observedGeneration")
 	_ = unstructured.SetNestedField(cpc.Object, version, "status", "version")
 	_ = unstructured.SetNestedSlice(cpc.Object, []interface{}{
 		map[string]interface{}{"type": "Available", "status": "True"},
@@ -153,6 +154,7 @@ func TestControlPlaneStepTimerLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.objects = append(c.objects, readyStepCPC("4.21.0"))
+	c.objects = append(c.objects, readyHCP(regressionHC("4.21.0")))
 	got = reconcileRegression(t, c)
 	if got.Status.Phase != upgradev1alpha1.PhaseUpgradingControlPlane || got.Status.ControlPlaneStatus.StartTime != nil || len(collectedGauges(t, metricStepDuration)) != 0 {
 		t.Fatalf("intermediate verification retained the timer: %+v", got.Status)
@@ -166,6 +168,9 @@ func TestControlPlaneStepTimerLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := c.store(readyStepCPC("4.22.0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.store(readyHCP(regressionHC("4.22.0"))); err != nil {
 		t.Fatal(err)
 	}
 	got = reconcileRegression(t, c)

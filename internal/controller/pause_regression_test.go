@@ -119,6 +119,7 @@ func TestResumeVerifiesTargetWhenIntermediatePassed(t *testing.T) {
 	if err := c.store(readyStepCPC("4.22.0")); err != nil {
 		t.Fatal(err)
 	}
+	c.objects = append(c.objects, readyHCP(regressionHC("4.22.0")))
 	got.Spec.PausedUntil = nil
 	if err := c.store(got); err != nil {
 		t.Fatal(err)

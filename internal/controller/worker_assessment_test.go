@@ -99,7 +99,7 @@ func TestWorkerCompletionRequiresFreshPositiveEvidence(t *testing.T) {
 				_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{"type": "UpdatingConfig", "status": "True", "observedGeneration": int64(2)}}, "status", "conditions")
 			case "same version new digest":
 				np.SetGeneration(3)
-				hcu.Spec.TargetReleaseImage = strings.Replace(regressionImage("4.21.0"), "sha256:1", "sha256:b", 1)
+				hcu.Spec.TargetReleaseImage = strings.Split(regressionImage("4.21.0"), "@")[0] + "@sha256:" + strings.Repeat("b", 64)
 				_ = unstructured.SetNestedField(np.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
 			}
 			c := &regressionClient{objects: objects}
