@@ -26,6 +26,14 @@ The two drain gauges use only `namespace` and `name` labels and are separate fro
 
 Import [the dashboard JSON](monitoring/grafana-dashboard.json) into Grafana and select a Prometheus datasource scraping the coordinator's `/metrics` endpoint. The dashboard refreshes every **30 seconds**. Instant panels show the latest samples at the selected time range's end; rollout curves show history across that range.
 
+The coordinator refreshes non-completed upgrades at least every 30 seconds, even
+when upstream status is quiet. Duration gauges therefore advance during stalls.
+Overall duration is wall-clock age since the upgrade began, including schedule
+waits. Step duration starts at actuation and excludes pre-start scheduling, but
+includes coordinator pauses because HyperShift work can continue independently.
+Completed steps stop exporting active-duration series; these gauges are not a
+durable history of completed step durations.
+
 ### Dashboard Variables
 
 | Variable | Type | Purpose / Query |

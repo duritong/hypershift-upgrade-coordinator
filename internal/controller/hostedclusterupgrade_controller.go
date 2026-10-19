@@ -320,6 +320,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 		expectedCPVer, _ := upgradev1alpha1.ExtractVersion(hcu.Status.ControlPlaneStatus.TargetReleaseImage)
 		_ = r.aggregateControlPlaneStatus(ctx, hcu, expectedCPVer)
+		r.refreshDrainDiagnostics(ctx, hcu)
 
 		// Expose Paused metrics
 		r.exposePhaseMetrics(ctx, hcu, uHC)
@@ -334,6 +335,9 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			if err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if pausedRequeueAfter <= 0 || pausedRequeueAfter > 30*time.Second {
+			pausedRequeueAfter = 30 * time.Second
 		}
 		return ctrl.Result{RequeueAfter: pausedRequeueAfter}, nil
 	}
@@ -532,9 +536,8 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 						return ctrl.Result{}, statusErr
 					}
 				}
-				// Cap requeue duration to 5 minutes so status messages update periodically
-				if requeueDur > 5*time.Minute {
-					requeueDur = 5 * time.Minute
+				if requeueDur > 30*time.Second {
+					requeueDur = 30 * time.Second
 				}
 				return ctrl.Result{RequeueAfter: requeueDur}, nil
 			}
@@ -744,6 +747,10 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 
+	// Elapsed gauges and log observations cannot rely on status events during a stall.
+	if hcu.Status.Phase != upgradev1alpha1.PhaseCompleted && (stateRequeueAfter <= 0 || stateRequeueAfter > 30*time.Second) {
+		stateRequeueAfter = 30 * time.Second
+	}
 	return ctrl.Result{RequeueAfter: stateRequeueAfter}, nil
 }
 
@@ -1470,8 +1477,8 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	// Update status message with active scheduler/rollout telemetry
 	if shortestRequeue > 0 {
 		hcu.Status.Message = fmt.Sprintf("Worker upgrades waiting. Next schedule or user pause expires in %s.", shortestRequeue.Round(time.Second).String())
-		if shortestRequeue > 5*time.Minute {
-			shortestRequeue = 5 * time.Minute
+		if shortestRequeue > 30*time.Second {
+			shortestRequeue = 30 * time.Second
 		}
 		return true, shortestRequeue, nil
 	}
@@ -1484,7 +1491,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		return true, time.Second * 5, nil // Requeue quickly to observe the unpause
 	}
 
-	return false, 0, nil
+	return true, 30 * time.Second, nil
 }
 
 // checkPausedState evaluates if the coordinator is paused (indefinitely or timed).
