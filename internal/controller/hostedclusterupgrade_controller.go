@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -51,7 +50,7 @@ import (
 
 // LogScraper defines an interface for fetching HCCO logs (allows mock testing).
 type LogScraper interface {
-	GetHCCOLogs(ctx context.Context, namespace, podName string) (string, error)
+	GetHCCOLogs(ctx context.Context, namespace, podName string, since time.Time) (string, error)
 }
 
 // KubeLogScraper fetches HCCO logs from the cluster.
@@ -59,7 +58,9 @@ type KubeLogScraper struct {
 	Client kubernetes.Interface
 }
 
-func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix string) (string, error) {
+func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix string, since time.Time) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, drainLogTimeout)
+	defer cancel()
 	if k.Client == nil {
 		return "", fmt.Errorf("kubernetes client is nil")
 	}
@@ -70,7 +71,7 @@ func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix s
 	if err != nil || len(podList.Items) == 0 {
 		podList, err = k.Client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("HCCO pod discovery unavailable")
 		}
 	}
 
@@ -92,21 +93,21 @@ func (k *KubeLogScraper) GetHCCOLogs(ctx context.Context, namespace, podPrefix s
 	}
 
 	tailLines := int64(200)
+	limitBytes := int64(drainLogByteLimit)
+	sinceTime := metav1.NewTime(since)
 	req := k.Client.CoreV1().Pods(namespace).GetLogs(targetPod, &corev1.PodLogOptions{
-		TailLines: &tailLines,
+		TailLines:  &tailLines,
+		LimitBytes: &limitBytes,
+		Timestamps: true,
+		SinceTime:  &sinceTime,
 	})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("HCCO log request unavailable")
 	}
 	defer podLogs.Close()
 
-	buf := new(strings.Builder)
-	_, err = io.Copy(buf, podLogs)
-	if err != nil {
-		return "", err
-	}
-	return buf.String(), nil
+	return readDrainLogs(podLogs)
 }
 
 // HostedClusterUpgradeReconciler reconciles a HostedClusterUpgrade object
@@ -129,7 +130,7 @@ type DefaultMockLogScraper struct {
 	MockLogs string
 }
 
-func (d *DefaultMockLogScraper) GetHCCOLogs(ctx context.Context, namespace, podName string) (string, error) {
+func (d *DefaultMockLogScraper) GetHCCOLogs(ctx context.Context, namespace, podName string, since time.Time) (string, error) {
 	return d.MockLogs, nil
 }
 
@@ -1403,8 +1404,6 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 							}
 						}
 
-						// Run HCCO container log scraping to trace blocked drains
-						blockers = r.scrapeHCCOLogsForDrains(ctx, hcu.Namespace, hcu.Name, np.name)
 						if assessment.reason != "" {
 							blockers = append(blockers, assessment.reason)
 						}
@@ -1446,6 +1445,16 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	}
 
 	hcu.Status.NodePoolStatuses = hcuStatuses
+	// Diagnostics are best-effort and run only after rollout actions, once per cluster.
+	var drainBlockers []string
+	for i := range hcuStatuses {
+		if hcuStatuses[i].Phase == "Upgrading" {
+			if drainBlockers == nil {
+				drainBlockers = r.scrapeHCCOLogsForDrains(ctx, hcu.Namespace, hcu.Name, "")
+			}
+			hcuStatuses[i].Blockers = append(hcuStatuses[i].Blockers, drainBlockers...)
+		}
+	}
 
 	if allCompleted {
 		// All groups successfully verified and upgraded! Transition state machine to Completed.
@@ -1485,7 +1494,7 @@ func (r *HostedClusterUpgradeReconciler) scrapeHCCOLogsForDrains(ctx context.Con
 	cpNamespace := WorkerControlPlaneNamespace(namespace, clusterName)
 
 	// Retrieve logs via our mock/injectable scraper interface
-	logsBlock, err := r.LogScraper.GetHCCOLogs(ctx, cpNamespace, "hosted-cluster-config-operator")
+	logsBlock, err := r.LogScraper.GetHCCOLogs(ctx, cpNamespace, "hosted-cluster-config-operator", time.Now().Add(-drainLogLookback))
 	if err != nil {
 		return blockers
 	}

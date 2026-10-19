@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,7 +78,7 @@ func TestWorkerAnnotationAndMembershipUpdateRouting(t *testing.T) {
 
 type namespaceLogScraper struct{ namespace string }
 
-func (s *namespaceLogScraper) GetHCCOLogs(_ context.Context, namespace, _ string) (string, error) {
+func (s *namespaceLogScraper) GetHCCOLogs(_ context.Context, namespace, _ string, _ time.Time) (string, error) {
 	s.namespace = namespace
 	return "", nil
 }

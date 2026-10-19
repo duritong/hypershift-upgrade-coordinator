@@ -1369,7 +1369,7 @@ var _ = Describe("HostedClusterUpgrade Controller Reconciler", func() {
 		It("Issue 3.1: should safely handle KubeLogScraper with nil client, deduplicate and bound log blockers to 10 entries", func() {
 			// 1. KubeLogScraper with nil client returns error
 			nilScraper := &KubeLogScraper{Client: nil}
-			_, err := nilScraper.GetHCCOLogs(ctx, "test-ns", "test-pod")
+			_, err := nilScraper.GetHCCOLogs(ctx, "test-ns", "test-pod", time.Now())
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("kubernetes client is nil"))
 
