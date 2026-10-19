@@ -448,6 +448,19 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		baseline, _ := GetHostedClusterCurrentRelease(uHC)
 		desired, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(baseline, desired) {
+			next, planErr := plannedControlPlaneRelease(uHC, hcu)
+			if planErr != nil {
+				hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
+				hcu.Status.Message = planErr.Error()
+				break
+			}
+			if !samePayload(next, desired) {
+				if err := canInitiateControlPlane(uHC); err != nil {
+					hcu.Status.Message = err.Error()
+					stateRequeueAfter = 10 * time.Second
+					break
+				}
+			}
 			if err := r.verifyControlPlane(ctx, hcu, uHC, baseline); err != nil {
 				hcu.Status.Message = fmt.Sprintf("Preflight CP prerequisite: %v", err)
 				stateRequeueAfter = 10 * time.Second
@@ -539,6 +552,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Apply the version change on the HostedCluster spec!
+		if err := canInitiateControlPlane(uHC); err != nil {
+			hcu.Status.Message = err.Error()
+			stateRequeueAfter = 10 * time.Second
+			break
+		}
 		baseline, _ := GetHostedClusterCurrentRelease(uHC)
 		if err := r.verifyControlPlane(ctx, hcu, uHC, baseline); err != nil {
 			hcu.Status.Message = fmt.Sprintf("Previous CP prerequisite: %v", err)
@@ -1767,9 +1785,6 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 			}
 			if cType == "Degraded" && cStatus == "True" {
 				return false, fmt.Errorf("HostedCluster contains degraded condition: %s", cMsg)
-			}
-			if cType == "ClusterVersionUpgradeable" && cStatus == "False" {
-				return false, fmt.Errorf("HostedCluster is not upgradeable: %s", cMsg)
 			}
 			if cType == "ValidHostedControlPlaneConfiguration" && cStatus == "False" {
 				return false, fmt.Errorf("HostedCluster has invalid control plane configuration: %s", cMsg)

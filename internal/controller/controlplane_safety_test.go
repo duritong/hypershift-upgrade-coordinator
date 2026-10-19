@@ -163,3 +163,39 @@ func TestWorkersRecheckControlPlaneAfterSchedule(t *testing.T) {
 		t.Fatal("active worker paused")
 	}
 }
+
+func TestUpgradeabilityIsOnlyANewControlPlaneGate(t *testing.T) {
+	for _, status := range []string{"True", "False", "Unknown", "missing"} {
+		for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhaseUpgradingControlPlane, upgradev1alpha1.PhaseVerifyingControlPlane, upgradev1alpha1.PhaseUpgradingNodePools} {
+			t.Run(status+"/"+string(phase), func(t *testing.T) {
+				hcu := regressionHCU(phase)
+				version := "4.21.0"
+				if phase == upgradev1alpha1.PhaseUpgradingControlPlane {
+					version = "4.20.0"
+				}
+				hc := regressionHC(version)
+				conditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+				conditions = conditions[:3]
+				if status != "missing" {
+					conditions = append(conditions, map[string]interface{}{"type": "ClusterVersionUpgradeable", "status": status})
+				}
+				_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
+				c := &regressionClient{objects: []client.Object{hcu, hc}}
+				addReadyCP(c, hc)
+				if phase == upgradev1alpha1.PhaseUpgradingNodePools {
+					c.objects = append(c.objects, quiescentWorkerFixtures(regressionNP("workers", ""))...)
+				}
+				got := reconcileRegression(t, c)
+				if phase == upgradev1alpha1.PhaseUpgradingControlPlane {
+					if (c.writes > 0) != (status == "True") {
+						t.Fatalf("new release gate: writes=%d status=%+v", c.writes, got.Status)
+					}
+				} else if phase == upgradev1alpha1.PhaseVerifyingControlPlane && got.Status.Phase != upgradev1alpha1.PhaseUpgradingNodePools {
+					t.Fatalf("next-upgrade condition prevented completion: %+v", got.Status)
+				} else if phase == upgradev1alpha1.PhaseUpgradingNodePools && c.writes == 0 {
+					t.Fatalf("next-upgrade condition prevented workers: %+v", got.Status)
+				}
+			})
+		}
+	}
+}

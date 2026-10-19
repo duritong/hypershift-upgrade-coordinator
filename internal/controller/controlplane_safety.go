@@ -12,6 +12,19 @@ import (
 
 var gvkHCP = gvkHC.GroupVersion().WithKind("HostedControlPlane")
 
+// Conservatively require explicit approval for patch as well as minor starts.
+// Upgradeable describes the next upgrade, not readiness of the current release.
+func canInitiateControlPlane(hc *unstructured.Unstructured) error {
+	conditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+	for _, item := range conditions {
+		c, _ := item.(map[string]interface{})
+		if c["type"] == "ClusterVersionUpgradeable" && c["status"] == "True" {
+			return nil
+		}
+	}
+	return fmt.Errorf("a new control plane release requires ClusterVersionUpgradeable=True")
+}
+
 // Payload identity is independent of registry mirrors and human-readable tags.
 // Never fall back to version equality when comparing immutable payloads.
 func samePayload(a, b string) bool {
