@@ -402,6 +402,17 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 
+	if err := r.validateUpgradePlan(ctx, hcu); err != nil {
+		markUpgradeBlocked(hcu)
+		hcu.Status.Message = fmt.Sprintf("Upgrade plan safety gate blocked: %v", err)
+		r.updateConditions(hcu)
+		r.exposePhaseMetrics(ctx, hcu, uHC)
+		if !reflect.DeepEqual(originalStatus, &hcu.Status) {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, r.Status().Update(ctx, hcu)
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	if err := r.verifyReleasePayloads(ctx, hcu, uHC); err != nil {
 		markUpgradeBlocked(hcu)
 		hcu.Status.Message = fmt.Sprintf("Release payload safety gate blocked: %v", err)
