@@ -220,7 +220,8 @@ func init() {
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=upgrade.0xshift.dev,resources=hostedclusterupgrades/finalizers,verbs=update
-//+kubebuilder:rbac:groups=hypershift.openshift.io,resources=controlplanecomponents;hostedclusters;nodepools,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedclusters;nodepools,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=hypershift.openshift.io,resources=controlplanecomponents,verbs=get;list;watch
 //+kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedcontrolplanes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get;list
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get
