@@ -557,6 +557,12 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Apply the version change on the HostedCluster spec!
+		if start := hcu.Spec.ControlPlane.StartAt; start != nil && time.Now().Before(start.Time) {
+			hcu.Status.Phase = upgradev1alpha1.PhasePendingSchedule
+			hcu.Status.Message = "Control Plane schedule changed; waiting before initiating a new release."
+			stateRequeueAfter = min(time.Until(start.Time), 5*time.Minute)
+			break
+		}
 		if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
 			hcu.Status.Phase = upgradev1alpha1.PhaseBlocked
 			hcu.Status.Message = err.Error()

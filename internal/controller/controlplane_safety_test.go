@@ -262,3 +262,29 @@ func TestWholeControlPlanePathWorkerSkew(t *testing.T) {
 		}
 	}
 }
+
+func TestControlPlaneActuationHonorsChangedSchedule(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingControlPlane)
+	future := metav1.NewTime(time.Now().Add(time.Hour))
+	hcu.Spec.ControlPlane.StartAt = &future
+	hc := regressionHC("4.20.0")
+	c := &regressionClient{objects: []client.Object{hcu, hc}}
+	addReadyCP(c, hc)
+	got := reconcileRegression(t, c)
+	if c.writes != 0 || got.Status.Phase != upgradev1alpha1.PhasePendingSchedule {
+		t.Fatalf("changed schedule bypassed immediately before actuation: %+v writes=%d", got.Status, c.writes)
+	}
+	// Scheduling edits must not interfere with observing a previously requested rollout.
+	_ = unstructured.SetNestedField(hc.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+	if err := c.store(hc); err != nil {
+		t.Fatal(err)
+	}
+	got.Status.Phase = upgradev1alpha1.PhaseUpgradingControlPlane
+	if err := c.store(got); err != nil {
+		t.Fatal(err)
+	}
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane || c.writes != 0 {
+		t.Fatal("future schedule prevented adoption of an already requested rollout")
+	}
+}
