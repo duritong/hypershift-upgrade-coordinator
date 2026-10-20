@@ -33,6 +33,12 @@ import (
 // TestGuestAccessRealAuthorization uses a real API server with RBAC and envtest's
 // service-account signing keys/issuer. Missing API assets fail setup, never skip.
 func TestGuestAccessRealAuthorization(t *testing.T) {
+	for _, namespace := range []string{GuestObserverNamespace, "custom-guest-observer"} {
+		t.Run(namespace, func(t *testing.T) { testGuestAccessRealAuthorization(t, namespace) })
+	}
+}
+
+func testGuestAccessRealAuthorization(t *testing.T, observerNamespace string) {
 	assets := os.Getenv("KUBEBUILDER_ASSETS")
 	if assets == "" {
 		assets = filepath.Join("..", "..", "bin", "k8s", "1.32.0-linux-amd64")
@@ -70,6 +76,7 @@ func TestGuestAccessRealAuthorization(t *testing.T) {
 	}
 	clock := &accessTestClock{now: time.Now().UTC().Truncate(time.Second)}
 	r, key := newAccessManagement(t, c, clock)
+	r.ObserverNamespace = observerNamespace
 	// Unlike observerKubeconfig, published admin kubeconfig embeds the envtest cert.
 	k := clientcmdapi.NewConfig()
 	k.Clusters["guest"] = &clientcmdapi.Cluster{Server: c.Host, CertificateAuthorityData: c.CAData}
@@ -106,24 +113,7 @@ func TestGuestAccessRealAuthorization(t *testing.T) {
 	}
 	// Authorization caches propagate asynchronously; this wait is bounded by real
 	// wall time, not the policy clock or an arbitrary health dwell interval.
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTicker(25 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		_, err = observer.Resource(cvResource).Get(ctx, "version", metav1.GetOptions{})
-		if err == nil {
-			break
-		}
-		if !apierrors.IsForbidden(err) {
-			t.Fatalf("observer authentication failed: %v", err)
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("observer authorization did not propagate")
-		case <-tick.C:
-		}
-	}
+	waitGuestCVPermission(t, ctx, observer, cvResource, true)
 	operators, err := observer.Resource(coResource).List(ctx, metav1.ListOptions{})
 	if err != nil || len(operators.Items) != 1 {
 		t.Fatalf("observer CO list failed: %v", err)
@@ -139,23 +129,23 @@ func TestGuestAccessRealAuthorization(t *testing.T) {
 			return err
 		},
 		"read-secret": func() error {
-			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(GuestObserverNamespace).Get(ctx, "anything", metav1.GetOptions{})
+			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(observerNamespace).Get(ctx, "anything", metav1.GetOptions{})
 			return err
 		},
 		"list-secrets": func() error {
-			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(GuestObserverNamespace).List(ctx, metav1.ListOptions{})
+			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(observerNamespace).List(ctx, metav1.ListOptions{})
 			return err
 		},
 		"list-pods": func() error {
-			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(GuestObserverNamespace).List(ctx, metav1.ListOptions{})
+			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(observerNamespace).List(ctx, metav1.ListOptions{})
 			return err
 		},
 		"mutate-workload": func() error {
-			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(GuestObserverNamespace).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]interface{}{"name": "forbidden"}}}, metav1.CreateOptions{})
+			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(observerNamespace).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]interface{}{"name": "forbidden"}}}, metav1.CreateOptions{})
 			return err
 		},
 		"create-secret": func() error {
-			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(GuestObserverNamespace).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "forbidden"}}}, metav1.CreateOptions{})
+			_, err := observer.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(observerNamespace).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "forbidden"}}}, metav1.CreateOptions{})
 			return err
 		},
 	} {
@@ -173,7 +163,7 @@ func TestGuestAccessRealAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !review.Status.Authenticated || review.Status.User.Username != "system:serviceaccount:"+GuestObserverNamespace+":"+GuestObserverName || len(review.Status.Audiences) == 0 {
+	if !review.Status.Authenticated || review.Status.User.Username != "system:serviceaccount:"+observerNamespace+":"+GuestObserverName || len(review.Status.Audiences) == 0 {
 		t.Fatalf("wrong token identity or audience: %+v", review.Status)
 	}
 	if strings.Contains(string(delivery.Data["kubeconfig"]), "client-certificate-data") {
@@ -183,7 +173,53 @@ func TestGuestAccessRealAuthorization(t *testing.T) {
 	if err != nil || !exp.After(time.Now()) || exp.After(time.Now().Add(61*time.Minute)) {
 		t.Fatalf("unexpected real token expiration: %v %v", exp, err)
 	}
+	if observerNamespace == GuestObserverNamespace {
+		r.ObserverNamespace = "migrated-guest-observer"
+		hcu = accessReconcile(t, r, key)
+		if !hcu.Status.GuestAccess.MaintenanceReady {
+			t.Fatalf("real namespace migration failed: %+v", hcu.Status.GuestAccess)
+		}
+		replacement, err := guest.ScopedConfig(accessDelivery(t, r).Data["kubeconfig"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		newObserver, err := dynamic.NewForConfig(replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitGuestCVPermission(t, ctx, newObserver, cvResource, true)
+		waitGuestCVPermission(t, ctx, observer, cvResource, false)
+		review, err := adminKube.AuthenticationV1().TokenReviews().Create(ctx, &authv1.TokenReview{Spec: authv1.TokenReviewSpec{Token: replacement.BearerToken}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal("migrated token review failed:", err)
+		}
+		if !review.Status.Authenticated || review.Status.User.Username != "system:serviceaccount:"+r.ObserverNamespace+":"+GuestObserverName {
+			t.Fatalf("wrong migrated token identity: %+v", review.Status)
+		}
+	}
 	t.Run("management-secret-cache", func(t *testing.T) { testAccessSecretCache(t, ctx, c) })
+}
+
+func waitGuestCVPermission(t *testing.T, ctx context.Context, observer dynamic.Interface, resource schema.GroupVersionResource, allowed bool) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		_, err := observer.Resource(resource).Get(ctx, "version", metav1.GetOptions{})
+		if (allowed && err == nil) || (!allowed && apierrors.IsForbidden(err)) {
+			return
+		}
+		if err != nil && !apierrors.IsForbidden(err) {
+			t.Fatalf("unexpected observer authentication result: %v", err)
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("observer permission allowed=%t did not propagate", allowed)
+		case <-tick.C:
+		}
+	}
 }
 
 type accessRoundTripper func(*http.Request) (*http.Response, error)

@@ -50,6 +50,7 @@ type accessGuestFixture struct {
 	mu                                        sync.Mutex
 	objects                                   map[string]map[string]interface{}
 	writes, tokens, observerReads, adminReads int
+	tokenPaths                                []string
 	failToken, denyObserver, loseToken        bool
 	onToken                                   func()
 	expires                                   time.Time
@@ -119,6 +120,7 @@ func (g *accessGuestFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.tokens++
+		g.tokenPaths = append(g.tokenPaths, r.URL.Path)
 		if g.onToken != nil {
 			g.onToken()
 		}
@@ -275,7 +277,7 @@ func TestGuestAccessBootstrapAndRotation(t *testing.T) {
 	}
 	role := g.objects["/apis/rbac.authorization.k8s.io/v1/clusterroles/"+GuestObserverName]
 	rules := role["rules"].([]interface{})
-	if len(rules) != 2 || accessHash(rules) != accessHash(observerProfile(&accessSource{hc: &unstructured.Unstructured{}})[2].object.Object["rules"]) {
+	if len(rules) != 2 || accessHash(rules) != accessHash(observerProfile(&accessSource{hc: &unstructured.Unstructured{}}, GuestObserverNamespace)[2].object.Object["rules"]) {
 		t.Fatalf("unexpected role: %v", role)
 	}
 	expected := guest.Release{Version: "4.18.1", Image: "quay.io/ocp/release:4.18.1-x86_64@sha256:" + strings.Repeat("a", 64)}

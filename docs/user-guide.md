@@ -94,12 +94,31 @@ never work around it by disabling verification.
 
 ### Credential Ownership And Lifecycle
 
-The fixed guest namespace, ServiceAccount, ClusterRole and binding are named
-`huc-guest-observer`. They are tagged with HC UID, cluster ID and profile revision;
+The dedicated guest namespace defaults to `huc-guest-observer`. Configure it for
+all managed hosted clusters with the deployment-wide flag:
+
+```text
+--guest-observer-namespace=custom-guest-observer
+```
+
+This is a namespace inside each hosted cluster, not HUC's management-cluster
+`--operator-namespace`. It must be a valid Kubernetes namespace name. HUC creates
+and owns it; existing unowned or shared namespaces are not adopted. The
+ServiceAccount, ClusterRole and binding names remain `huc-guest-observer`.
+They are tagged with HC UID, cluster ID and profile revision;
 unowned/conflicting resources are refused. The guest role grants **only** `get`
 on `config.openshift.io/clusterversions` named `version` and `list` on all
 `clusteroperators`. It grants no guest Secret/workload access, mutations or watches.
 Owned profile drift is repaired only while active.
+
+Changing this flag invalidates old observer connections and provisions the new
+dedicated namespace/ServiceAccount before reissuing credentials and replacing the
+owned delivery Secret. It may temporarily withhold upgrade actions while access
+converges. Migration waits for resume when an HCU is paused; it cannot bootstrap a
+new namespace or identity under the renewal-only exception. Existing credentials
+without namespace metadata continue to work only with the unchanged default.
+Old guest namespaces and ServiceAccounts are not automatically deleted; after
+migration, the owned ClusterRoleBinding refers only to the new ServiceAccount.
 
 TokenRequest requests one hour with API-default audiences and honors the actual
 returned expiration. No legacy ServiceAccount token Secret is created. Only the

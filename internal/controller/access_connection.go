@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -117,7 +119,32 @@ type GuestAccessProvider struct {
 	OperatorNamespace      string
 	HostedClusterNamespace string
 	EndpointMode           string
+	ObserverNamespace      string // Empty selects GuestObserverNamespace.
 	Clock                  Clock
+}
+
+// ValidateGuestObserverNamespace checks Kubernetes namespace DNS-label syntax.
+func ValidateGuestObserverNamespace(namespace string) error {
+	if errors := validation.IsDNS1123Label(namespace); len(errors) > 0 {
+		return fmt.Errorf("invalid guest observer namespace %q: %s", namespace, strings.Join(errors, "; "))
+	}
+	return nil
+}
+
+func (p *GuestAccessProvider) observerNamespace() string {
+	if p.ObserverNamespace == "" {
+		return GuestObserverNamespace
+	}
+	return p.ObserverNamespace
+}
+
+func (p *GuestAccessProvider) deliveryNamespaceMatches(secret *corev1.Secret) bool {
+	namespace, recorded := secret.Annotations[accessPrefix+"observer-namespace"]
+	if !recorded {
+		// Credentials issued before namespace configuration always used this default.
+		namespace = GuestObserverNamespace
+	}
+	return namespace == p.observerNamespace()
 }
 
 func (p *GuestAccessProvider) now() time.Time {
@@ -127,6 +154,9 @@ func (p *GuestAccessProvider) now() time.Time {
 	return time.Now()
 }
 func (p *GuestAccessProvider) source(ctx context.Context, key client.ObjectKey) (*accessSource, error) {
+	if err := ValidateGuestObserverNamespace(p.observerNamespace()); err != nil {
+		return nil, accessFailure("InvalidObserverNamespace")
+	}
 	if p.APIReader == nil {
 		return nil, accessFailure("SourceReaderUnavailable")
 	}
@@ -266,7 +296,7 @@ func (p *GuestAccessProvider) buildTarget(ctx context.Context, key client.Object
 	}
 	a := secret.Annotations
 	expires, err := time.Parse(time.RFC3339, a[accessPrefix+"expires-at"])
-	if !deliveryOwned(secret, s) || a[accessPrefix+"endpoint-revision"] != revision || a[accessPrefix+"cv-uid"] == "" || a[accessPrefix+"sa-uid"] == "" {
+	if !deliveryOwned(secret, s) || !p.deliveryNamespaceMatches(secret) || a[accessPrefix+"endpoint-revision"] != revision || a[accessPrefix+"cv-uid"] == "" || a[accessPrefix+"sa-uid"] == "" {
 		return guest.Target{}, nil, accessFailure("CredentialIdentityMismatch")
 	}
 	if err != nil || !p.now().Add(guest.CollectionTimeout).Before(expires) {

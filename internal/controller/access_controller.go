@@ -61,6 +61,9 @@ func (r *GuestAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.OperatorNamespace == "" {
 		return accessFailure("OperatorNamespaceRequired")
 	}
+	if err := ValidateGuestObserverNamespace(r.observerNamespace()); err != nil {
+		return err
+	}
 	if r.EndpointMode != "" && r.EndpointMode != GuestEndpointInternal && r.EndpointMode != GuestEndpointPublished {
 		return accessFailure("UnsupportedEndpointMode")
 	}
@@ -176,7 +179,10 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 	if s.paused && !exists {
 		return 0, accessFailure("PausedBootstrapDeferred")
 	}
-	if exists && secret.Annotations[accessPrefix+"endpoint-revision"] == revision {
+	if exists && s.paused && !r.deliveryNamespaceMatches(secret) {
+		return 0, accessFailure("PausedNamespaceChangeDeferred")
+	}
+	if exists && r.deliveryNamespaceMatches(secret) && secret.Annotations[accessPrefix+"endpoint-revision"] == revision {
 		exp, err := time.Parse(time.RFC3339, secret.Annotations[accessPrefix+"expires-at"])
 		renewAt, renewalErr := time.Parse(time.RFC3339, secret.Annotations[accessPrefix+"renew-at"])
 		scoped, configErr := guest.ScopedConfig(secret.Data["kubeconfig"])
@@ -218,7 +224,7 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 		return 0, accessFailure("AdminTransportFailed")
 	}
 	seconds := int64(3600)
-	token, err := k.CoreV1().ServiceAccounts(GuestObserverNamespace).CreateToken(ctx, GuestObserverName, &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
+	token, err := k.CoreV1().ServiceAccounts(r.observerNamespace()).CreateToken(ctx, GuestObserverName, &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
 	if err != nil {
 		return 0, accessFailure("TokenRequestFailed")
 	}
@@ -272,8 +278,9 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 		accessPrefix + "hc-uid": string(s.hc.GetUID()), accessPrefix + "hcu-uid": string(s.hcu.UID),
 		accessPrefix + "cluster-id": s.clusterID, accessPrefix + "cv-uid": string(cv.UID), accessPrefix + "sa-uid": string(sa.GetUID()),
 		accessPrefix + "profile": GuestObserverProfile, accessPrefix + "endpoint-revision": revision,
-		accessPrefix + "expires-at": token.Status.ExpirationTimestamp.UTC().Format(time.RFC3339),
-		accessPrefix + "renew-at":   renewAt.UTC().Format(time.RFC3339),
+		accessPrefix + "observer-namespace": r.observerNamespace(),
+		accessPrefix + "expires-at":         token.Status.ExpirationTimestamp.UTC().Format(time.RFC3339),
+		accessPrefix + "renew-at":           renewAt.UTC().Format(time.RFC3339),
 	}
 	secret.Data = map[string][]byte{"kubeconfig": data}
 	if exists {
@@ -338,25 +345,27 @@ type profileObject struct {
 	fields []string
 }
 
-func observerProfile(s *accessSource) []profileObject {
+func observerProfile(s *accessSource, namespace string) []profileObject {
 	labels := map[string]string{GuestAccessLabel: "true"}
 	annotations := map[string]string{accessPrefix + "hc-uid": string(s.hc.GetUID()), accessPrefix + "cluster-id": s.clusterID, accessPrefix + "profile": GuestObserverProfile}
 	metadata := func(ns string) metav1.ObjectMeta {
 		return metav1.ObjectMeta{Name: GuestObserverName, Namespace: ns, Labels: labels, Annotations: annotations}
 	}
 	no := false
+	namespaceMetadata := metadata("")
+	namespaceMetadata.Name = namespace
 	objects := []struct {
 		obj    runtime.Object
 		gvr    schema.GroupVersionResource
 		fields []string
 	}{
-		{&corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"}, ObjectMeta: metadata("")}, corev1.SchemeGroupVersion.WithResource("namespaces"), nil},
-		{&corev1.ServiceAccount{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"}, ObjectMeta: metadata(GuestObserverNamespace), AutomountServiceAccountToken: &no}, corev1.SchemeGroupVersion.WithResource("serviceaccounts"), []string{"automountServiceAccountToken"}},
+		{&corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"}, ObjectMeta: namespaceMetadata}, corev1.SchemeGroupVersion.WithResource("namespaces"), nil},
+		{&corev1.ServiceAccount{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"}, ObjectMeta: metadata(namespace), AutomountServiceAccountToken: &no}, corev1.SchemeGroupVersion.WithResource("serviceaccounts"), []string{"automountServiceAccountToken"}},
 		{&rbacv1.ClusterRole{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"}, ObjectMeta: metadata(""), Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusterversions"}, ResourceNames: []string{"version"}, Verbs: []string{"get"}},
 			{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusteroperators"}, Verbs: []string{"list"}},
 		}}, rbacv1.SchemeGroupVersion.WithResource("clusterroles"), []string{"rules", "aggregationRule"}},
-		{&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metadata(""), RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: GuestObserverName}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: GuestObserverName, Namespace: GuestObserverNamespace}}}, rbacv1.SchemeGroupVersion.WithResource("clusterrolebindings"), []string{"roleRef", "subjects"}},
+		{&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metadata(""), RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: GuestObserverName}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: GuestObserverName, Namespace: namespace}}}, rbacv1.SchemeGroupVersion.WithResource("clusterrolebindings"), []string{"roleRef", "subjects"}},
 	}
 	var result []profileObject
 	for _, v := range objects {
@@ -373,7 +382,7 @@ func profileOwned(obj *unstructured.Unstructured, s *accessSource) bool {
 
 func (r *GuestAccessReconciler) profile(ctx context.Context, s *accessSource, d dynamic.Interface, repair bool) (*unstructured.Unstructured, error) {
 	var sa *unstructured.Unstructured
-	for _, desired := range observerProfile(s) {
+	for _, desired := range observerProfile(s, r.observerNamespace()) {
 		resource := d.Resource(desired.gvr).Namespace(desired.object.GetNamespace())
 		actual, err := resource.Get(ctx, desired.object.GetName(), metav1.GetOptions{})
 		if apierrors.IsNotFound(err) && repair && !s.paused {

@@ -48,8 +48,9 @@ IdentityMismatch and UnsupportedEvidence. Verdicts refer to their `purpose`, not
 a global cluster health guarantee; historical Completed is not live health.
 
 Guest observation is mandatory; no spec fields provide check skips, exclusions,
-force or bypass behavior. Endpoint/operator-namespace settings are deployment
-configuration, not HCU-selected credential references or guest RBAC policy.
+force or bypass behavior. The guest endpoint mode, guest observer namespace and
+operator namespace are deployment configuration, not HCU-selected credential
+references or guest RBAC policy.
 See the [user guide](user-guide.md#mandatory-guest-access-unreleased).
 
 ---
