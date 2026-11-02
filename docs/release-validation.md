@@ -1,78 +1,59 @@
 # Release Payload Validation
 
-The single target payload must also match every associated NodePool's `spec.arch`
-(HyperShift's omitted value defaults to `amd64`). Mixed-architecture fleets within
-one HostedCluster require a multiarchitecture payload strategy and are rejected
-by this coordinator's current single-architecture release contract before any
-worker locks or release writes.
+Before updating a `HostedCluster` or `NodePool`, HUC validates that the configured release image exists in the registry, matches the claimed version, and is compatible with the cluster's CPU architecture.
 
-Admission validates release pullspec syntax and the claimed version path without
-contacting registries. Before active reconciliation can lock workers or change a
-HostedCluster or NodePool, the controller also verifies the actual digest-pinned
-target payload and any intermediate payload still ahead of the control plane.
-An intermediate already reached is not fetched. Target validation still runs
-when the control plane is already at target and workers need upgrading.
+---
 
-The registry lookup discards the mutable tag and fetches the pinned digest. The
-authoritative version is the ImageStream `metadata.name` in
-`release-manifests/image-references`; architecture comes from the image config.
-Both must match the tag, including prerelease versions. Needed intermediate and
-target hops must have the same architecture. Indexes require exactly one matching
-Linux platform selected by the tag suffix (`x86_64`, `aarch64`, `ppc64le`, or
-`s390x`). A `multi` suffix is rejected because there is no explicit platform
-selection policy. This gate does not yet validate individual NodePool architecture
-compatibility or the current cluster's architecture.
+## 1. Release Image Syntax & Digest Pinning
 
-## Private Registries
+Every release image must use a fully-qualified, digest-pinned pullspec:
 
-The controller retrieves the Secret named by the HostedCluster's `spec.pullSecret`
-in the HostedCluster namespace using the uncached API reader. It requires a
-nonempty `.dockerconfigjson` entry. Missing or unreadable Secrets, malformed
-references/configs, and authentication failures block upgrades; they never fall
-back to anonymous access. A Docker config without credentials for the selected
-registry can use anonymous registry access. Inline `auths` entries support Docker
-credentials and tokens through the registry library. Credential helpers, process
-Docker configuration, and external commands such as `oc` are not used.
+```text
+registry.example.com/openshift-release-dev/ocp-release:<version>-<arch>@sha256:<64-hex-digest>
+```
 
-Anonymous access without a Secret is allowed only when the HostedCluster has no
-pull-secret reference (useful for lightweight fixtures); production HyperShift
-schemas require that reference. Fleet RBAC grants only `get` on Secrets, not
-`list` or `watch`, and no Secret informer is started by these lookups.
+- **Digest Pinning:** Tags are mutable and can be changed in a registry. HUC uses the `@sha256:` digest as the immutable payload identity.
+- **Syntactic Validation:** Admission webhooks validate that the pullspec matches the required format and that version tags follow semantic versioning.
+- **Architecture Consistency:** The CPU architecture indicated in the tag (e.g. `x86_64`, `aarch64`) must match all associated NodePools (`spec.arch`, defaulting to `amd64`). Multi-architecture payloads that do not specify a platform suffix are currently rejected to guarantee consistent architecture selection.
 
-Secret bytes, credential-parser errors, registry responses, and resolver errors
-are not copied into controller logs or upgrade status. A failed lookup reports a
-sanitized payload-verification message and retries after 30 seconds. Check Secret
-existence, key contents, registry connectivity, permissions, and the payload using
-trusted administrative tooling when diagnosing that message.
+---
 
-## Disconnected Registries
+## 2. Registry Verification
 
-The coordinator contacts the registry in the configured release pullspec directly.
-It does not apply node-side ImageDigestMirrorSet, ImageContentSourcePolicy, or
-HyperShift mirror settings. In disconnected environments, use a digest-pinned
-pullspec naming a reachable mirror whose payload version and architecture match
-the tag, and include credentials for that mirror in the HC pull Secret.
+Before modifying any cluster specifications, HUC directly contacts the image registry to inspect the release payload metadata:
 
-TLS verification uses the coordinator container's system trust store. There is
-no per-HostedCluster CA, insecure-registry switch, or automatic import of cluster
-registry CAs. Private-CA registries require an appropriately configured system
-trust store in the coordinator deployment; do not disable verification.
+1. **Layer Streaming:** HUC streams image metadata without downloading full payload layers. It inspects the `release-manifests/image-references` file inside the payload to verify:
+   - The payload version (`metadata.name`) matches the claimed version.
+   - The image configuration matches the target architecture.
+2. **Digest Integrity:** The downloaded bytes are checked against the specified SHA-256 digest.
+3. **Caching:** Successfully verified payloads are cached in an in-memory FIFO cache (up to 128 entries) keyed by the pullspec and pull-secret hash. Failed lookups are never cached and retry after 30 seconds.
 
-## Resource Bounds
+---
 
-Each lookup has a 30-second deadline (or an earlier caller deadline), a 64 MiB
-per-response/compressed-layer limit, a 256 MiB total expanded-layer limit, and a
-4 MiB image-references limit. Layer extraction streams compressed and expanded
-bytes instead of buffering an entire layer. Only the metadata member is retained;
-zstd decoder memory is capped at 16 MiB. The decompressed stream and underlying
-compressed blob are drained through EOF before trusting metadata, so the registry
-library completes digest integrity checks even after the tar member was found.
-Oversized or unsupported payloads fail closed. These limits are currently fixed,
-not runtime flags; parallel lookups and manifest/config parsing still consume
-memory, so monitor the deployment's memory budget.
+## 3. Pull Secrets & Authentication
 
-Only successful immutable lookups are cached, in a concurrency-safe FIFO cache of
-128 entries keyed by the pinned reference, full version/architecture claim, and a
-hash of the pull-secret bytes. Credential rotation therefore forces a fresh
-lookup. Failures are never cached. The controller independently checks returned
-metadata against its claims, even when using an injected resolver.
+HUC authenticates to container registries using the pull secret configured on the `HostedCluster`:
+
+- **Secret Retrieval:** HUC reads the secret referenced by `HostedCluster.spec.pullSecret` from the HostedCluster namespace.
+- **Format:** The secret must contain a valid `.dockerconfigjson` entry.
+- **Security:** Secret contents, tokens, and raw registry credentials are never logged or stored in CR status fields. If authentication fails, HUC surfaces a sanitized verification error and retries periodically.
+- **Anonymous Registries:** Anonymous access is permitted only if the `HostedCluster` does not define a pull secret (primarily used in local development fixtures).
+
+---
+
+## 4. Disconnected & Air-Gapped Environments
+
+In disconnected environments:
+
+- **Mirrored Pullspecs:** Configure the `HostedClusterUpgrade` to point directly to the reachable mirror registry containing the pinned payload digest.
+- **Mirror Credentials:** Ensure the HostedCluster pull secret includes valid credentials for the mirror registry.
+- **Custom Certificates:** If the mirror registry uses a private Certificate Authority (CA), ensure the coordinator deployment trusts that CA in its container trust store.
+
+---
+
+## 5. Resource Limits & Safety Bounds
+
+To ensure controller reliability when interacting with external registries:
+- **Request Timeout:** 30 seconds per registry request.
+- **Data Limits:** Maximum 64 MiB per compressed layer, 256 MiB total decompressed metadata, and 16 MiB decoder memory.
+- Payloads exceeding these bounds fail closed to prevent denial-of-service or memory exhaustion on the controller.

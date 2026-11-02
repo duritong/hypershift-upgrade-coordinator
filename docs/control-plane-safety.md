@@ -1,53 +1,52 @@
 # Control Plane Safety Policy
 
-The coordinator accepts an operator-supplied, trusted release plan. Numeric
-same-major, one-minor-hop validation and verified release metadata are necessary
-but **do not establish a supported CVO update-graph edge or recommendation**.
-Operators must validate the complete plan against the applicable OpenShift update
-graph, conditional recommendations, platform support, and HyperShift support
-matrix before submitting it. The coordinator does not query or invent graph
-approvals. There is no override for failed local safety checks.
+The HyperShift Upgrade Coordinator (HUC) enforces strict safety gates before and during control plane upgrades. This document explains the version skew rules, health requirements, and verification checks applied to Hosted Control Planes.
 
-Before initial worker locks and each new CP release request, actual NodePool
-`status.version` and every `status.nodesInfo.nodeVersions[].ocpVersion` must be
-known and satisfy same-major n-3 skew against the current CP and every remaining
-planned CP hop. Workers newer than the current CP, including a newer patch, are
-rejected. Missing or empty bucket evidence blocks, including scaled-to-zero pools;
-this conservative restriction can require restoring observable worker evidence
-before starting a CP upgrade. This follows the same-major portion of upstream
-`support/supportedversion.ValidateVersionSkew`; cross-major plans remain unsupported.
+---
 
-Every new CP release, including a patch, requires explicit
-`ClusterVersionUpgradeable=True`. This condition is not required to observe an
-already requested rollout, verify its completion, or finish worker upgrades.
-Health still requires `Available`, `ClusterVersionAvailable`, and
-`ClusterVersionSucceeding` to be true and no explicit failing/degraded condition.
+## 1. Upgrade Plan & Version Progression
 
-Guest and management payloads must remain coordinated: an independent HC
-`spec.controlPlaneRelease` override is rejected by admission and reconciliation,
-never overwritten. An existing request matching a planned hop can be adopted;
-conflicting requests are not replaced. Same-version, different-digest lateral
-upgrades are not supported. Payload equality compares immutable digests, allowing
-canonical digest-only status references and registry mirrors.
+- **Supported Path Responsibility:** HUC validates that planned upgrade hops follow valid semantic versioning rules (same major version, at most one minor hop per step). SRE teams must ensure that the planned path is supported by the OpenShift update graph and HyperShift release matrix. HUC does not query the OpenShift update graph service dynamically.
+- **Monotonic Progression:** Upgrades must strictly advance forward:
+  $$\text{Current Version} < \text{Intermediate Version} < \text{Target Version}$$
+  Downgrades and lateral version changes with differing digests are rejected by admission webhooks and preflight controllers.
+- **Digest-Pinned Payloads:** All release images must specify immutable digest references (`@sha256:<64-hex>`). Tags alone are not treated as authoritative.
 
-Completion requires the latest guest and management history entries to be
-`Completed` at the exact expected version and digest. It also requires the actual
-HCP `spec.releaseImage`, management `observedGeneration`, and all observed CPCs
-to agree with that payload and HCP generation. CPC freshness is relative to HCP
-generation, not CPC or HC generation. Missing HCP or CPC evidence blocks progress.
-An HCP `spec.controlPlaneReleaseImage` differing from the expected payload also
-blocks, even if the HC override has already been removed.
-The guest version status generation is not treated as an HC generation fence.
+---
 
-These prerequisites are checked again before subsequent hops and new worker
-actions, including after schedule waits. Degradation prevents new work; it does
-not pause active worker rollouts. Existing worker rollouts, even paused ones,
-must be positively quiescent before a new CP request. Only proven coordinator
-pause-only generation changes are discounted when evaluating quiescence.
+## 2. Worker Version Skew Gates (n-3)
 
-Observations use the controller client and optimistic resource updates. They are
-not a cross-resource transaction and cannot prevent a concurrent external writer
-from starting work after a prerequisite check. Operational field ownership and
-coordination are still required. HCP access is read-only fleet-wide. Tests simulate
-HyperShift evidence with explicit fixtures; envtest is not a deployed HyperShift
-end-to-end validation.
+To prevent worker nodes from becoming unsupported or disconnected during control plane upgrades, HUC validates version skew across all NodePools before:
+1. Acquiring initial worker locks.
+2. Requesting any control plane release change (both intermediate and target hops).
+
+### Skew Rules
+- **Maximum Skew:** Every NodePool (`status.version` and `status.nodesInfo.nodeVersions[].ocpVersion`) must be within **three minor versions (n-3)** of the active control plane and all remaining planned hops.
+- **No Workers Ahead of Control Plane:** Worker nodes cannot run a version newer than the control plane (including newer patch versions).
+- **Observable Telemetry Required:** NodePools must report active version information. If a pool has unpopulated version telemetry (for example, a pool newly created or scaled to zero without version history), HUC pauses the upgrade until observable version status is available.
+
+---
+
+## 3. Pre-Upgrade Health & Upgradeability Verification
+
+Before modifying `HostedCluster.spec.release.image`, HUC verifies that the cluster is healthy and ready to upgrade:
+
+- **Upgradeable Condition:** The control plane must explicitly report `ClusterVersionUpgradeable=True` (or condition status True on guest `ClusterVersion`). If an operator reports `Upgradeable=False`, the upgrade halts to allow SRE investigation.
+- **Availability:** Core control plane conditions must be healthy: `Available=True`, `ClusterVersionAvailable=True`, and `ClusterVersionSucceeding=True`, with no active `Degraded` or `Failing` conditions.
+- **Worker Quiescence:** All NodePools must be quiescent (paused and not actively rolling out changes) before a control plane release is updated.
+
+---
+
+## 4. Control Plane Verification & Rollout Completion
+
+A control plane upgrade step is only verified as complete when all of the following criteria are satisfied:
+
+1. **History Completion:** The latest entry in both `HostedCluster.status.version.history` and guest `ClusterVersion.status.history` reports `State: Completed` with the exact expected version and payload digest.
+2. **HCP Specification & Generation:** `HostedControlPlane.spec.releaseImage` matches the expected payload, and `status.controlPlaneVersion.observedGeneration` reflects the current generation.
+3. **ControlPlaneComponent (CPC) Readiness:** Every `ControlPlaneComponent` in the hosted control plane namespace (such as `kube-apiserver`, `etcd`, and `openshift-apiserver`) reports:
+   - `Available = True`
+   - `RolloutComplete = True`
+   - Active version matching the expected release.
+4. **Guest Cluster Verification:** Guest `ClusterVersion` and all in-tree `ClusterOperators` report matching versions and healthy conditions (`Available=True`, `Degraded=False`, `Progressing=False`).
+
+Only after all four layers are positively verified does HUC proceed to the next scheduled step (such as advancing to the target release in an EUS upgrade, or admitting worker NodePools).

@@ -1,145 +1,105 @@
 # OpenShift Virtualization Assessment
 
-HUC observes virtualization inside the hosted guest, not the platform hosting its
-NodePool machines. It never updates CatalogSources, Subscriptions, InstallPlans,
-HCO/KubeVirt configuration, ArgoCD applications, VMs or migrations. The external
-operator/GitOps owner remains responsible for those changes.
+The HyperShift Upgrade Coordinator (HUC) monitors the health and version compatibility of OpenShift Virtualization inside the hosted guest cluster.
 
-## Supported evidence
+HUC acts purely as a safety gate: it does not modify CatalogSources, Subscriptions, or virtual machine workloads. External GitOps tooling (such as ArgoCD) or cluster administrators remain responsible for orchestrating virtualization updates and VM live migrations.
 
-The observer lists HyperConverged resources using `hco.kubevirt.io/v1` when
-present, falling back to `hco.kubevirt.io/v1beta1`. KubeVirt resources are
-listed using `kubevirt.io/v1`. The supported installation is one HCO and one
-KubeVirt, in the same namespace, with a KubeVirt owner reference identifying that
-HCO by API version, kind, name and UID. Multiple installations are rejected rather
-than selecting the first object. A complete empty HCO list means no instance is
-installed. A version-endpoint 404 means absence only if the HCO API group also
-returns 404; an existing group with an unsupported API blocks. Forbidden,
-malformed, partial, deleting and ambiguous evidence never means absence. No
-retained installation inventory is maintained.
+---
 
-Lists require valid type and resource-version evidence, no continuation or
-remaining items, and at most one instance. Reads share the existing four-MiB and
-ten-second collection budgets, five-second request deadline and 30-second action
-age. HCO and KubeVirt are read again to detect changes across collection, inside
-the ClusterVersion bracket. Reads are not an atomic transaction or controller
-heartbeat proof.
+## 1. Supported Architecture & Discovery
 
-Both resources need valid identities and status observed generations equal to
-their own metadata generations. HCO must explicitly report healthy system status,
-Available=True, Degraded=False, Progressing=False and ReconcileComplete=True.
-Pre-request and intermediate gates also require Upgradeable=True. Missing,
-unknown and malformed required evidence blocks. KubeVirt must be Available,
-non-Degraded, non-Progressing, with equal nonempty target/observed KubeVirt versions
-and deployment IDs. A zero workload count must be explicitly observed; missing,
-null, wrong-type and negative counters are not zero.
+- **Supported Topology:** HUC validates clusters running a standard singleton installation of OpenShift Virtualization: one `HyperConverged` resource (typically in `openshift-cnv`) and its associated `KubeVirt` operand resource.
+- **Dual API Support:** HUC automatically discovers `HyperConverged` using `hco.kubevirt.io/v1` if available, gracefully falling back to `hco.kubevirt.io/v1beta1`. `KubeVirt` is discovered via `kubevirt.io/v1`.
+- **Optional Presence:** If OpenShift Virtualization is not installed on the cluster, HUC detects its absence and skips all virtualization gates without error.
+- **Fail-Closed Evidence:** If virtualization custom resources exist but return errors, unpopulated status, or degraded conditions, HUC pauses upgrade transitions until health is verified.
 
-## Upgrade boundaries
+---
 
-| Boundary | Version | Workloads and external preparation |
-| --- | --- | --- |
-| Source/preflight | HCO major/minor matches current OCP | Explicit zero outdated workloads; intermediate paths require explicitly disabled automatic updates in both HCO and effective KubeVirt spec |
-| Before each CP request | HCO major/minor matches current OCP | Explicit zero, except a verified intermediate source with updates held; holds required until target CP |
-| Intermediate verification | HCO major/minor matches intermediate OCP | Outdated workloads allowed; automatic workload updates must remain disabled |
-| Each new worker action | HCO major/minor matches target OCP | Explicit zero; intermediate paths require that automatic workload updates have been restored (`CNVWorkloadUpdatesStillHeld` blocks if methods remain empty) and migrations completed |
-| Final completion, including no NodePools | HCO major/minor matches target OCP | Explicit zero |
+## 2. Health & Readiness Criteria
 
-Intermediate workload skew is intentional: requiring zero after the intermediate
-operator update while workload updates are disabled could deadlock a valid EUS
-path. The same exception permits adoption of an already-reached intermediate
-payload, verified through the existing management and guest proofs. It never
-applies to the initial source or worker actions.
-HCO must have an explicit empty update-method list (its default is LiveMigrate).
-The effective KubeVirt list must be empty or omitted: the supported KubeVirt v1
-API defines omission as no automatic workload updates and serializes empty lists
-with `omitempty`.
-Health/version evidence is checked again at action boundaries; historical worker
-admission and an earlier healthy preflight do not authorize later actions.
-Already-started HyperShift rollouts are not cancelled or relocked by a failed gate.
+When OpenShift Virtualization is detected, HUC inspects:
 
-**Version policy:** a virtualization version matching the current OCP major/minor
-(y-stream) is sufficient at each boundary. Its patch (z-stream) need not match the
-OCP patch or the latest available virtualization release. This is the accepted
-policy, not an outstanding validation gap; no catalog/latest-patch check is needed.
-All health, freshness, convergence and workload gates above still apply.
+1. **System Health:** `HyperConverged.status.systemHealthStatus` must report `"healthy"`.
+2. **Aggregated Conditions:** `HyperConverged` conditions must report:
+   - `Available = True`
+   - `Degraded = False`
+   - `Progressing = False` (convergence allowed during rolling worker updates)
+   - `ReconcileComplete = True`
+   - `Upgradeable = True` (required prior to control plane mutations and during intermediate verification)
+3. **KubeVirt Operand Status:** The child `KubeVirt` resource must be healthy and fully converged (`targetKubeVirtVersion == observedKubeVirtVersion` and `targetDeploymentID == observedDeploymentID`).
+4. **Outdated Workloads:** `KubeVirt.status.outdatedVirtualMachineInstanceWorkloads` must be `0` before starting an upgrade, before worker rollouts, and at final completion. A non-zero count indicates that running VMs still use older launcher pods from a previous update and must complete live migration.
+5. **Freshness:** Both resources must report `observedGeneration == generation`.
 
-The external owner remains responsible for approvals, disabling/restoring workload
-updates and migrations according to the supported release-specific procedure.
-Do not interpret `GuestReady` as proof of every VM's migration readiness.
+---
 
-Reference: [Red Hat control-plane-only virtualization updates](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/virtualization/updating).
+## 3. Upgrade Boundaries & EUS Flow
 
-## Non-migratable VMs and NodePool Drain Blockers
+| Upgrade Phase | Expected Version | Workload Updates & Migration Rules |
+| :--- | :--- | :--- |
+| **Source / Preflight** (`SourceBaseline`) | HCO major/minor matches current OCP | Outdated workloads must be `0`. On EUS intermediate paths, automatic workload updates must be disabled (`workloadUpdateMethods: []`). |
+| **Before Control Plane Hop** (`BeforeControlPlaneRequest`) | HCO major/minor matches current OCP | Outdated workloads must be `0` (except during a held intermediate hop). Workload updates must remain disabled until target CP completes. |
+| **Intermediate CP Verification** (`IntermediateVerification`) | HCO major/minor matches intermediate OCP | Outdated workloads are allowed while updates are held. Workload updates must remain disabled (`[]`). |
+| **Worker Rollout Entry** (`WorkerEntry`) | HCO major/minor matches target OCP | Outdated workloads must be `0`. On intermediate paths, workload updates must be restored (`CNVWorkloadUpdatesStillHeld` blocks if methods remain empty). |
+| **Active Worker Rollouts** (`WorkerGuard`) | HCO major/minor matches target OCP | Outdated workloads must be `0`. Monitored before admitting each subsequent NodePool. |
+| **Final Completion** (`FinalUpgradeVerification`) | HCO major/minor matches target OCP | Outdated workloads must be `0`. Evaluated across both standard and zero-NodePool paths. |
 
-During NodePool worker rollouts, machines are cordoned and drained via the Kubernetes
-eviction API. Virtual machine instances (VMIs) running on worker nodes must either
-live-migrate to another worker or allow termination during the drain.
+### EUS Workload Update Strategy (Hold & Restore)
+During an Extended Update Support (EUS) 2-minor upgrade (e.g., 4.14 → 4.15 → 4.16):
+1. **Hold Phase:** Before the control plane updates to the intermediate version, automatic workload updates should be turned off (`workloadUpdateStrategy.workloadUpdateMethods: []`). This prevents VMs from live-migrating back and forth during intermediate control plane updates.
+2. **Restore Phase:** Once the control plane reaches the final target release, GitOps restores `workloadUpdateMethods: ["LiveMigrate"]`. HUC holds worker admission (`CNVWorkloadUpdatesStillHeld`) until this configuration is restored, ensuring that live migration is active when worker nodes begin draining.
 
-### Causes of Non-Migratable VMs
-1. **Local storage:** VMs using hostpath provisioners, local PVs, or non-shared storage
-   cannot migrate across compute nodes.
-2. **Missing eviction strategy:** VMs lacking `spec.template.spec.evictionStrategy: LiveMigrate`
-   cannot be live-migrated by KubeVirt during eviction.
-3. **Hardware passthrough:** VMs with dedicated host devices (e.g. pinned GPUs, non-SR-IOV
-   passthrough devices) that bind to a specific node.
-4. **Capacity constraints:** Destination nodes lacking sufficient spare memory, CPU, or
-   matching node affinities/tolerations for the migrating VM.
+### Version Alignment Policy
+A virtualization version matching the current OpenShift major/minor (**y-stream**) is sufficient at each boundary. The patch level (**z-stream**) does not need to match the OpenShift patch or the latest catalog release. For example, OpenShift Virtualization 4.15.2 satisfies the intermediate gate for OpenShift Container Platform 4.15.28.
 
-### Coordinator Behavior and Detection
-- When a VMI cannot live-migrate, the virt-launcher pod cannot be evicted. The node
-  drain will stall until the drain timeout (typically 1 hour) or block the pool rollout.
-- HUC observes cluster-level drain failures via best-effort HCCO log collection and
-  reports them in `status.drainDiagnostics.messages`.
-- The blocked NodePool transitions to `phase: "Blocked"`, reporting `"drain"` blocker.
+---
+
+## 4. Non-Migratable VMs and NodePool Drain Blockers
+
+During NodePool worker rollouts, machines are cordoned and drained via the Kubernetes eviction API. Virtual machine instances (VMIs) running on worker nodes must either live-migrate to another node or allow termination during the drain.
+
+### Common Causes of Stuck Drains
+1. **Local Storage:** VMs using hostpath provisioners, local PVs, or non-shared storage cannot migrate across compute nodes.
+2. **Missing Eviction Strategy:** VMs lacking `spec.template.spec.evictionStrategy: LiveMigrate` cannot be live-migrated by KubeVirt during eviction.
+3. **Hardware Passthrough:** VMs with dedicated host devices (e.g. pinned GPUs or non-SR-IOV devices) bound to a specific physical node.
+4. **Capacity Constraints:** Destination worker nodes lacking sufficient spare memory, CPU, or matching node affinities/tolerations for the migrating VM.
+
+### Coordinator Detection & Alerts
+- When a VMI cannot live-migrate, the virt-launcher pod blocks node eviction. The node drain will stall until the drain timeout (typically 1 hour).
+- HUC observes cluster-level drain failures via best-effort HCCO log collection and reports them in `status.drainDiagnostics.messages`.
+- The blocked NodePool transitions to `phase: "Blocked"` with reason `"drain"`.
 - SRE Prometheus alerts fire:
   - `HypershiftUpgradeCoordinatorNodePoolStuck` fires after 30 minutes of a stalled pool.
   - `HypershiftUpgradeDrainObservations` fires if eviction errors are actively logged.
 
-### Actionable Remediation for SREs
-1. **Audit VMIs prior to upgrade:**
-   Check eviction strategies across all namespaces:
+### SRE Action & Remediation
+1. **Audit VMIs Prior to Upgrade:**
+   Identify VMs lacking a live migration strategy:
    ```bash
    oc get vmi -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,STRATEGY:.spec.evictionStrategy
    ```
-2. **Workaround for non-migratable VMs:**
-   For workloads that do not require continuous availability during machine reboots,
-   configure automated power-off during drains:
+2. **Workaround for Non-Migratable Workloads:**
+   For VMs that can tolerate temporary downtime during node reboots:
    - Set `spec.template.spec.evictionStrategy: None`
    - Set `spec.runStrategy: Always`
-   This allows the node drain to terminate the VMI cleanly; KubeVirt will restart it
-   automatically on a ready worker node after the drain.
-3. **Inspect ongoing migrations:**
-   If migrations stall during rolling upgrades:
+   This allows the node drain to terminate the VMI cleanly; KubeVirt will restart it automatically on a ready worker node after the drain.
+3. **Inspect Active Migrations:**
+   If live migrations stall during rolling upgrades:
    ```bash
    oc get vmim -A
    ```
-   Check `.status.phase` and error messages on VirtualMachineInstanceMigration objects.
+   Inspect `.status.phase` and error messages on VirtualMachineInstanceMigration objects.
 
-## Status and remediation
+---
 
-`status.guestAssessment.virtualization` reports the validated HCO version separately
-from the bounded ALL-current-ClusterOperator inventory. Fixed `CNV*` reasons appear
-in status and existing guest assessment/operator-blocker metrics. For example,
-`CNVWorkloadUpdatesNotHeld` requires external preparation,
-`CNVIntermediateVersionMismatch` requires the intermediate virtualization update,
-and `CNVOutdatedWorkloads` requires workload updates/migrations. Unknown or stale
-evidence must be repaired, not bypassed. Reconciliation retries automatically.
+## 5. Status Telemetry & Alerts
 
-## Observer-profile migration
-
-Profile `observer-v2` adds list-only access to HCO and KubeVirt. Observation never
-falls back to administrative credentials. Recognized v1 resources may be migrated
-only after existing ownership/target checks and fresh write fences. Migration
-updates owned guest resources and the existing delivery Secret in place, publishes
-a renewed scoped credential, and is idempotent. Partial migration can be retried.
-Unknown profiles and foreign identities are never adopted.
-
-Old-profile credentials cannot authorize actions. While paused, profile migration
-and RBAC repair are deferred until resume; no Secret recreation or bootstrap is
-introduced. Current-profile renewal retains its previous pause policy. Recognized
-old delivery Secrets are still cleaned up when enrollment is removed. Deploy the
-updated CRD with the operator image so the separate summary is retained.
-
-Tests cover bounded wire reads, pure policy, real observer RBAC, migration and
-simulated production-reconciler paths. They do not replace deployed HyperShift/CNV
-testing or establish support for APIs outside the evidence contract above.
+- **Status Summary:** When present, the active operator version appears in `status.guestAssessment.virtualization`.
+- **Blockers:** Active virtualization blockers appear in `status.guestAssessment.blockers`:
+  - `CNVIntermediateVersionMismatch`: Virtualization has not yet upgraded to the intermediate minor version.
+  - `CNVTargetVersionMismatch`: Virtualization has not yet upgraded to the target minor version.
+  - `CNVWorkloadUpdatesNotHeld`: Workload updates must be disabled before intermediate control plane upgrades.
+  - `CNVWorkloadUpdatesStillHeld`: Workload updates must be restored before worker node rollouts.
+  - `CNVOutdatedWorkloads`: Running VMs still have outdated launcher pods; waiting for live migrations to complete.
+  - `CNVNotUpgradeable`: HyperConverged reports `Upgradeable=False`.
+  - `CNVSystemUnhealthy`: HyperConverged reports an unhealthy system status.
+- **Prometheus Alert:** `HypershiftUpgradeGuestVirtualizationBlocked` fires if any virtualization blocker persists for more than 15 minutes during an active upgrade.

@@ -1,60 +1,51 @@
 # HostedClusterUpgrade Custom Resource Specification
 
-This document specifies all available configuration knobs inside the `HostedClusterUpgrade` Custom Resource (CR) spec and details its status telemetry fields.
+This document details all configuration fields inside the `HostedClusterUpgrade` Custom Resource (CR) spec and explains the observed telemetry fields reported in status.
 
 ---
 
-## 1. Custom Resource Fields Specification
+## 1. Specification Fields (`.spec`)
 
-The `HostedClusterUpgrade` CR is designed to be user-centric, explicit, and easy to configure via GitOps.
-
-### A. Configuration Knobs (`.spec`)
-
-| Field | Type | Required / Optional | Description / Allowed Values |
+| Field | Type | Required / Optional | Description |
 | :--- | :--- | :--- | :--- |
-| **`targetReleaseImage`** | `string` | **Required** | The final targeted OpenShift release payload image. Must include the tag and SHA-256 digest (e.g., `quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:e2c7...`). |
-| **`intermediateReleaseImage`** | `string` | *Optional* | An optional single intermediate OpenShift release payload image used for Extended Update Support (EUS) leaps (e.g., jumping from `4.12` to `4.14` via `4.13`). |
-| **`pausedUntil`** | `string` | *Optional* | Pause new upgrade actions with `"true"` (or `"True"`) indefinitely, or a future RFC3339 timestamp until expiry. Existing guest credential renewal/update is allowed; bootstrap, RBAC repair and missing-identity/Secret recreation are not. Set to `"false"` or omit to run normally. |
-| **`controlPlane.startAt`** | `string` | *Optional* | An RFC3339 timestamp indicating the earliest time the control plane upgrade may begin. If omitted or nil, the control plane upgrade starts immediately once preflight checks pass. |
-| **`rolloutPolicy.maxParallelNodePools`** | `integer` | *Optional* | The maximum number of worker NodePools within the same priority group that can be upgraded concurrently. Defaults to `1`. |
-| **`nodePoolGroups`** | `array` | *Optional* | List of sequential NodePool groups to coordinate rollout schedules. First groups in this list upgrade first. If omitted, all NodePools default to the `"default"` group. Each element requires a `name` and optional scheduled `startAt` RFC3339 timestamp. |
+| **`targetReleaseImage`** | `string` | **Required** | The target OpenShift release payload image. Must include the version tag and immutable SHA-256 digest (e.g. `quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64@sha256:...`). |
+| **`intermediateReleaseImage`** | `string` | *Optional* | A single intermediate release image used for 2-minor EUS jumps (e.g. moving from `4.12` to `4.14` via `4.13`). |
+| **`pausedUntil`** | `string` | *Optional* | Pauses coordinator actions. Set to `"true"` for indefinite pausing, or an RFC3339 timestamp for a scheduled pause. Set to `"false"` or omit to resume active reconciliation. |
+| **`controlPlane.startAt`** | `string` | *Optional* | An RFC3339 timestamp specifying the earliest time the control plane upgrade may start. If omitted, the control plane upgrades immediately after preflight checks pass. |
+| **`rolloutPolicy.maxParallelNodePools`** | `integer` | *Optional* | Maximum number of NodePools within the active group that can upgrade concurrently. Defaults to `1`. |
+| **`nodePoolGroups`** | `array` | *Optional* | Ordered list of NodePool rollout groups. Groups execute sequentially in list order. Each entry requires a `name` and an optional `startAt` timestamp. Unlabeled pools belong to group `"default"`, which is automatically appended last if not defined. |
 
 ---
 
-### B. Observed Telemetry (`.status`)
+## 2. Status Telemetry Fields (`.status`)
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| **`phase`** | `string` | Current high-level phase of the state machine (e.g., `PreflightChecks`, `PendingSchedule`, `UpgradingControlPlane`, `VerifyingControlPlane`, `UpgradingNodePools`, `Completed`, `Blocked`, `Paused`). |
-| **`message`** | `string` | Human-readable details of the active step, countdown, or stuck drain blockages. |
-| **`startTime`** | `string` | RFC3339 timestamp when the upgrade process actually commenced (moved past `Idle`). |
-| **`completionTime`** | `string` | RFC3339 timestamp when the entire upgrade process completed successfully. |
-| **`aggregatedNodeStatus`** | `object` | Summary of total, updated, and ready worker nodes summed across all NodePools (e.g., `{"total": 12, "updated": 4, "ready": 10}`). |
-| **`controlPlaneStatus`** | `object` | Detailed metrics of the control plane component verification, listing total components, upgraded components, and active component rollout blockers. |
-| **`nodePoolStatuses`** | `array` | NodePool-level progress, node counts, schedules, and authoritative assessment/orchestration blockers. Unattributed HCCO logs are not pool blockers. |
-| **`drainDiagnostics`** | `object` | Best-effort cluster-level HCCO log hints: `available`, stable `reason` (`Collected`, `CollectionFailed`, `ScraperNotConfigured`), and at most ten recent `messages`. Unavailable collection is distinct from no observations. No NodePool/PDB ownership is inferred. |
-| **`guestAccess`** | `object` | Access-controller-owned maintenance and credential summary: `observedGeneration`, `reason`, `maintenanceReady`, `credentialAvailable`, `expiresAt`, identity/profile/endpoint metadata and `secretName`. No credentials. `observerUsability` remains `Unknown`; availability/maintenance are not proof of observer authentication or guest health. |
-| **`guestAssessment`** | `object` | Upgrade-controller-owned purpose-specific result: `state`, `reason`, `purpose`, `expectedVersion`, `observedGeneration`, `lastAttemptTime`, `lastSuccessfulObservation`, identity/revision fences, at most 256 CO name/version summaries, a separate optional `virtualization` name/version summary, and 32 blocker details, total `blockerCount` and `truncated`. |
-| **`workerAdmission`** | `object` | Compatible stage-adoption record, bound to HCU/HC identities, generation, plan and release revisions, with `admittedAt`. Never replaces a fresh per-action guest gate. |
-
-`GuestAccessMaintenanceReady` and `GuestCredentialAvailable` conditions belong to
-the access controller; `GuestAssessmentReady` belongs to upgrade reconciliation.
-The writers optimistically rebase only their owned status fields/conditions.
-`lastSuccessfulObservation` is the time of a successful scoped collection,
-**including unhealthy results**, not the last healthy decision. A later read
-failure can retain that diagnostic timestamp while returning Unavailable or
-AccessDenied. `state` also distinguishes Ready, Converging, Unhealthy,
-IdentityMismatch and UnsupportedEvidence. Verdicts refer to their `purpose`, not
-a global cluster health guarantee; historical Completed is not live health.
-
-Guest observation is mandatory; no spec fields provide check skips, exclusions,
-force or bypass behavior. The guest endpoint mode, guest observer namespace and
-operator namespace are deployment configuration, not HCU-selected credential
-references or guest RBAC policy.
-See the [user guide](user-guide.md#3-mandatory-guest-cluster-access).
+| **`phase`** | `string` | Current upgrade state machine phase: `PreflightChecks`, `PendingSchedule`, `UpgradingControlPlane`, `VerifyingControlPlane`, `UpgradingNodePools`, `Completed`, `Blocked`, or `Paused`. |
+| **`message`** | `string` | Human-readable explanation of current activity, schedule countdowns, or active blockers. |
+| **`startTime`** | `string` | RFC3339 timestamp when the upgrade process actively started (transitioned past `Idle`). |
+| **`completionTime`** | `string` | RFC3339 timestamp when the entire upgrade process completed. |
+| **`aggregatedNodeStatus`** | `object` | Summary of total, updated, and ready worker nodes summed across all NodePools (e.g. `{"total": 12, "updated": 4, "ready": 10}`). |
+| **`controlPlaneStatus`** | `object` | Detailed control plane component rollout status: active target image, total components, upgraded components, and component-specific blockers. |
+| **`nodePoolStatuses`** | `array` | Per-NodePool status entries detailing pool phase (`Scheduled`, `Upgrading`, `Completed`, `Blocked`), active version, schedules, and blockers. |
+| **`drainDiagnostics`** | `object` | Best-effort cluster-level drain/eviction hints collected from HCCO logs, including collection availability and recent messages. |
+| **`guestAccess`** | `object` | Summary of observer credential lifecycle: maintenance readiness, credential availability, expiration timestamp, and delivery secret name. |
+| **`guestAssessment`** | `object` | Result of guest cluster health assessment: verdict state (`Ready`, `Converging`, `Unhealthy`, `Unavailable`, `AccessDenied`), reason, expected version, operator summaries, and active blockers. |
+| **`guestAssessment.virtualization`** | `object` | Dedicated summary of OpenShift Virtualization operator name and version (reported separately from in-tree ClusterOperators). |
+| **`workerAdmission`** | `object` | Record of worker admission authorization, binding the upgrade plan to target release identity and admission timestamp. |
 
 ---
 
-## 2. GitOps & ArgoCD Integration Guide
+## 3. Status Conditions
 
-To deploy `HostedCluster` and `NodePool` resources via GitOps and coordinate automated, non-conflicting upgrades, please refer directly to the dedicated [**HostedClusterUpgrade GitOps & ArgoCD Integration Guide**](gitops.md).
+The coordinator maintains standard Kubernetes conditions in `status.conditions`:
+
+- **`GuestAccessMaintenanceReady`:** Indicates whether guest observer credentials and RBAC are maintained and ready for rotation.
+- **`GuestCredentialAvailable`:** Reflects whether a valid, unexpired observer bearer token is delivered and usable.
+- **`GuestAssessmentReady`:** Reports whether the latest scoped guest health assessment passed for the active upgrade purpose.
+
+---
+
+## 4. GitOps Integration
+
+For detailed instructions on integrating `HostedClusterUpgrade` resources with ArgoCD, setting drift ignore rules, and registering custom health checks, see the [GitOps Integration Guide](gitops.md).
