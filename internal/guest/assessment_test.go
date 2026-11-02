@@ -46,7 +46,7 @@ func setCondition(cs *[]configv1.ClusterOperatorStatusCondition, name, value str
 }
 func policyFor(p Purpose) Policy {
 	if p == SourceBaseline || p == BeforeControlPlaneRequest {
-		return Policy{p, release("4.21.0")}
+		return Policy{Purpose: p, NextRelease: release("4.21.0")}
 	}
 	return Policy{Purpose: p}
 }
@@ -252,7 +252,7 @@ func TestDynamicMembershipAndBounds(t *testing.T) {
 func TestMinorEligibilityAndPayloadMirrors(t *testing.T) {
 	s := healthySnapshot()
 	setCondition(&s.Operators[0].Status.Conditions, "Upgradeable", "False")
-	if r := Assess(s, s.Target, Policy{SourceBaseline, release("4.20.2")}, testNow); r.State != Ready {
+	if r := Assess(s, s.Target, Policy{Purpose: SourceBaseline, NextRelease: release("4.20.2")}, testNow); r.State != Ready {
 		t.Fatalf("CO minor veto applied to patch: %+v", r)
 	}
 	for _, p := range []Purpose{WorkerEntry, WorkerGuard, FinalUpgradeVerification} {
@@ -265,7 +265,7 @@ func TestMinorEligibilityAndPayloadMirrors(t *testing.T) {
 	if r := Assess(s, s.Target, Policy{Purpose: WorkerEntry}, testNow); r.State != Ready {
 		t.Fatalf("mirror rejected: %+v", r)
 	}
-	for _, p := range []Policy{{Purpose: "unknown"}, {Purpose: SourceBaseline}, {SourceBaseline, release("4.22.0")}, {SourceBaseline, release("5.0.0")}, {WorkerGuard, release("4.21.0")}} {
+	for _, p := range []Policy{{Purpose: "unknown"}, {Purpose: SourceBaseline}, {Purpose: SourceBaseline, NextRelease: release("4.22.0")}, {Purpose: SourceBaseline, NextRelease: release("5.0.0")}, {Purpose: WorkerGuard, NextRelease: release("4.21.0")}} {
 		if r := Assess(s, s.Target, p, testNow); r.State != UnsupportedEvidence {
 			t.Fatalf("invalid policy passed: %+v", r)
 		}
@@ -300,4 +300,268 @@ func TestFreshnessBoundaryAndBoundedSanitizedResult(t *testing.T) {
 	if len(b) > 128<<10 || strings.Contains(string(b), "secret-observer-token") || len(r.Operators) != MaxOperators || r.State == Ready {
 		t.Fatalf("unbounded or unsafe result: bytes=%d operators=%d state=%s", len(b), len(r.Operators), r.State)
 	}
+}
+
+func healthyVirtualization(version string) *VirtualizationSnapshot {
+	return &VirtualizationSnapshot{
+		Present:            true,
+		Name:               "kubevirt-hyperconverged",
+		Namespace:          "openshift-cnv",
+		SystemHealthStatus: "healthy",
+		Conditions: map[string]configv1.ConditionStatus{
+			"ReconcileComplete": configv1.ConditionTrue,
+			"Upgradeable":       configv1.ConditionTrue,
+			"Available":         configv1.ConditionTrue,
+			"Degraded":          configv1.ConditionFalse,
+			"Progressing":       configv1.ConditionFalse,
+		},
+		OperatorVersion:       version,
+		OutdatedWorkloads:     0,
+		WorkloadsObserved:     true,
+		HCO:                   metav1.ObjectMeta{Name: "kubevirt-hyperconverged", Namespace: "openshift-cnv", UID: "hco-uid", Generation: 1, ResourceVersion: "1"},
+		KubeVirt:              metav1.ObjectMeta{Name: "kubevirt-kubevirt-hyperconverged", Namespace: "openshift-cnv", UID: "kv-uid", Generation: 1, ResourceVersion: "1"},
+		HCOObservedGeneration: 1, KubeVirtObservedGeneration: 1, KubeVirtConverged: true,
+		WorkloadMethodsObserved: true,
+	}
+}
+
+func TestVirtualizationAssessmentMatrix(t *testing.T) {
+	purposes := []Purpose{
+		SourceBaseline,
+		BeforeControlPlaneRequest,
+		ObserveControlPlane,
+		IntermediateVerification,
+		WorkerEntry,
+		WorkerGuard,
+		FinalUpgradeVerification,
+	}
+
+	t.Run("absent-virt-passes-all", func(t *testing.T) {
+		for _, p := range purposes {
+			s := healthySnapshot()
+			s.Virtualization = nil
+			r := Assess(s, s.Target, policyFor(p), testNow)
+			if p == ObserveControlPlane {
+				if r.State != Converging || r.Reason != "ObservationOnly" {
+					t.Fatalf("%s: expected ObservationOnly, got %+v", p, r)
+				}
+			} else if r.State != Ready {
+				t.Fatalf("%s: expected Ready, got %+v", p, r)
+			}
+
+			s.Virtualization = nil
+			r = Assess(s, s.Target, policyFor(p), testNow)
+			if p == ObserveControlPlane {
+				if r.State != Converging || r.Reason != "ObservationOnly" {
+					t.Fatalf("%s: expected ObservationOnly, got %+v", p, r)
+				}
+			} else if r.State != Ready {
+				t.Fatalf("%s: expected Ready, got %+v", p, r)
+			}
+		}
+	})
+
+	t.Run("healthy-virt-passes-and-summarizes", func(t *testing.T) {
+		for _, p := range purposes {
+			s := healthySnapshot()
+			s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+			r := Assess(s, s.Target, policyFor(p), testNow)
+			if p == ObserveControlPlane {
+				if r.State != Converging {
+					t.Fatalf("%s: expected Converging, got %+v", p, r)
+				}
+			} else if r.State != Ready {
+				t.Fatalf("%s: expected Ready, got %+v", p, r)
+			}
+			if r.Virtualization == nil || r.Virtualization.Version != s.Target.Expected.Version {
+				t.Fatalf("%s: openshift-virtualization missing from operators summary: %+v", p, r.Operators)
+			}
+		}
+	})
+
+	t.Run("system-health-unhealthy", func(t *testing.T) {
+		for _, health := range []string{"warning", "error", "unknown"} {
+			for _, p := range []Purpose{SourceBaseline, BeforeControlPlaneRequest, IntermediateVerification, WorkerEntry, WorkerGuard, FinalUpgradeVerification} {
+				s := healthySnapshot()
+				s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+				s.Virtualization.SystemHealthStatus = health
+				r := Assess(s, s.Target, policyFor(p), testNow)
+				if r.State != Unhealthy || r.Reason != "CNVSystemUnhealthy" {
+					t.Fatalf("%s (%s): expected Unhealthy/CNVSystemUnhealthy, got %+v", p, health, r)
+				}
+			}
+		}
+	})
+
+	t.Run("condition-upgradeable", func(t *testing.T) {
+		cases := []struct {
+			purpose Purpose
+			nextRel string
+			want    State
+			reason  string
+		}{
+			{SourceBaseline, "4.21.0", Unhealthy, "CNVNotUpgradeable"}, // minor hop gates on Upgradeable
+			{SourceBaseline, "4.20.2", Unhealthy, "CNVNotUpgradeable"},
+			{BeforeControlPlaneRequest, "4.21.0", Unhealthy, "CNVNotUpgradeable"},
+			{IntermediateVerification, "", Unhealthy, "CNVNotUpgradeable"}, // intermediate must be ready for next hop
+			{WorkerEntry, "", Ready, "GuestReady"},
+			{WorkerGuard, "", Ready, "GuestReady"},
+		}
+		for _, tc := range cases {
+			t.Run(string(tc.purpose)+"-"+tc.nextRel, func(t *testing.T) {
+				s := healthySnapshot()
+				s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+				s.Virtualization.Conditions["Upgradeable"] = configv1.ConditionFalse
+				pol := Policy{Purpose: tc.purpose}
+				if tc.nextRel != "" {
+					pol.NextRelease = release(tc.nextRel)
+				}
+				r := Assess(s, s.Target, pol, testNow)
+				if r.State != tc.want || r.Reason != tc.reason {
+					t.Fatalf("expected %s/%s, got %+v", tc.want, tc.reason, r)
+				}
+			})
+		}
+	})
+
+	t.Run("condition-degraded", func(t *testing.T) {
+		for _, p := range purposes {
+			s := healthySnapshot()
+			s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+			s.Virtualization.Conditions["Degraded"] = configv1.ConditionTrue
+			r := Assess(s, s.Target, policyFor(p), testNow)
+			if r.State != Unhealthy || r.Reason != "CNVDegraded" {
+				t.Fatalf("%s: expected Unhealthy/CNVDegraded, got %+v", p, r)
+			}
+		}
+	})
+
+	t.Run("condition-not-available", func(t *testing.T) {
+		for _, p := range purposes {
+			s := healthySnapshot()
+			s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+			s.Virtualization.Conditions["Available"] = configv1.ConditionFalse
+			r := Assess(s, s.Target, policyFor(p), testNow)
+			if r.State != Unhealthy || r.Reason != "CNVNotAvailable" {
+				t.Fatalf("%s: expected Unhealthy/CNVNotAvailable, got %+v", p, r)
+			}
+		}
+	})
+
+	t.Run("condition-progressing", func(t *testing.T) {
+		cases := []struct {
+			purpose Purpose
+			want    State
+			reason  string
+		}{
+			{SourceBaseline, Converging, "CNVProgressing"},
+			{BeforeControlPlaneRequest, Converging, "CNVProgressing"},
+			{IntermediateVerification, Converging, "CNVProgressing"},
+			{WorkerEntry, Converging, "CNVProgressing"},
+			{WorkerGuard, Converging, "CNVProgressing"},
+			{FinalUpgradeVerification, Converging, "CNVProgressing"},
+		}
+		for _, tc := range cases {
+			t.Run(string(tc.purpose), func(t *testing.T) {
+				s := healthySnapshot()
+				s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+				s.Virtualization.Conditions["Progressing"] = configv1.ConditionTrue
+				r := Assess(s, s.Target, policyFor(tc.purpose), testNow)
+				if r.State != tc.want || r.Reason != tc.reason {
+					t.Fatalf("expected %s/%s, got %+v", tc.want, tc.reason, r)
+				}
+			})
+		}
+	})
+
+	t.Run("outdated-workloads", func(t *testing.T) {
+		cases := []struct {
+			purpose Purpose
+			want    State
+			reason  string
+		}{
+			{SourceBaseline, Converging, "CNVOutdatedWorkloads"},
+			{BeforeControlPlaneRequest, Converging, "CNVOutdatedWorkloads"},
+			{IntermediateVerification, Ready, "GuestReady"},
+			{WorkerEntry, Converging, "CNVOutdatedWorkloads"},
+			{WorkerGuard, Converging, "CNVOutdatedWorkloads"},
+			{FinalUpgradeVerification, Converging, "CNVOutdatedWorkloads"},
+		}
+		for _, tc := range cases {
+			t.Run(string(tc.purpose), func(t *testing.T) {
+				s := healthySnapshot()
+				s.Virtualization = healthyVirtualization(s.Target.Expected.Version)
+				s.Virtualization.OutdatedWorkloads = 5
+				r := Assess(s, s.Target, policyFor(tc.purpose), testNow)
+				if r.State != tc.want || r.Reason != tc.reason {
+					t.Fatalf("expected %s/%s, got %+v", tc.want, tc.reason, r)
+				}
+			})
+		}
+	})
+
+	t.Run("version-alignment", func(t *testing.T) {
+		// IntermediateVerification: expected is 4.21.0
+		s := healthySnapshot()
+		s.Target.Expected = release("4.21.0")
+		s.Version.Status.Desired.Version = s.Target.Expected.Version
+		s.Version.Status.History[0].Version = s.Target.Expected.Version
+		s.Operators[0].Status.Versions[0].Version = s.Target.Expected.Version
+
+		// HCO at 4.20.1 -> mismatch!
+		s.Virtualization = healthyVirtualization("4.20.1")
+		r := Assess(s, s.Target, Policy{Purpose: IntermediateVerification}, testNow)
+		if r.State != Converging || r.Reason != "CNVIntermediateVersionMismatch" {
+			t.Fatalf("expected IntermediateVersionMismatch, got %+v", r)
+		}
+
+		// HCO updated to 4.21.3 -> matches intermediate minor!
+		s.Virtualization = healthyVirtualization("4.21.3")
+		r = Assess(s, s.Target, Policy{Purpose: IntermediateVerification}, testNow)
+		if r.State != Ready {
+			t.Fatalf("expected Ready on matched intermediate version, got %+v", r)
+		}
+
+		// WorkerEntry: expected is target 4.22.0
+		s.Target.Expected = release("4.22.0")
+		s.Version.Status.Desired.Version = s.Target.Expected.Version
+		s.Version.Status.History[0].Version = s.Target.Expected.Version
+		s.Operators[0].Status.Versions[0].Version = s.Target.Expected.Version
+
+		// HCO still at 4.21.3 -> target mismatch!
+		s.Virtualization = healthyVirtualization("4.21.3")
+		r = Assess(s, s.Target, Policy{Purpose: WorkerEntry}, testNow)
+		if r.State != Converging || r.Reason != "CNVTargetVersionMismatch" {
+			t.Fatalf("expected TargetVersionMismatch, got %+v", r)
+		}
+
+		// HCO updated to 4.22.0 -> matches target!
+		s.Virtualization = healthyVirtualization("4.22.0")
+		r = Assess(s, s.Target, Policy{Purpose: WorkerEntry}, testNow)
+		if r.State != Ready {
+			t.Fatalf("expected Ready on matched target version, got %+v", r)
+		}
+
+		// SourceBaseline: expected is 4.20.1, HCO at 4.19.0 -> mismatch!
+		s.Target.Expected = release("4.20.1")
+		s.Version.Status.Desired.Version = s.Target.Expected.Version
+		s.Version.Status.History[0].Version = s.Target.Expected.Version
+		s.Operators[0].Status.Versions[0].Version = s.Target.Expected.Version
+		s.Virtualization = healthyVirtualization("4.19.0")
+		r = Assess(s, s.Target, policyFor(SourceBaseline), testNow)
+		if r.State != Converging || r.Reason != "CNVVersionMismatch" {
+			t.Fatalf("expected CNVVersionMismatch at SourceBaseline, got %+v", r)
+		}
+	})
+
+	t.Run("malformed-operator-version", func(t *testing.T) {
+		for _, badVersion := range []string{"invalid", "4.20", "4.20.1/build", ""} {
+			s := healthySnapshot()
+			s.Virtualization = healthyVirtualization(badVersion)
+			r := Assess(s, s.Target, Policy{Purpose: IntermediateVerification}, testNow)
+			if r.State != UnsupportedEvidence || r.Reason != "MissingOrMalformedOperatorVersion" {
+				t.Fatalf("expected UnsupportedEvidence/MissingOrMalformedOperatorVersion for %q, got %+v", badVersion, r)
+			}
+		}
+	})
 }

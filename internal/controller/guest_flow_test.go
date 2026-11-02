@@ -444,12 +444,17 @@ func TestGuestFlowFreshGateForEachAction(t *testing.T) {
 				f.readyTarget()
 			}
 			reads := 0
-			trigger := 4
+			// Change the CO at the next collection boundary, independent of the
+			// number of optional-component reads inside each CV bracket.
+			trigger := 3
 			if boundary == "workers" {
-				trigger = 7
+				trigger = 5
 			}
 			f.guest.mu.Lock()
-			f.guest.onObserverRead = func() {
+			f.guest.onObserverReadPath = func(path string) {
+				if path != "/apis/config.openshift.io/v1/clusterversions/version" {
+					return
+				}
 				reads++
 				if reads == trigger {
 					f.guest.operators[0].Status.Conditions = fixtureConditions(map[string]bool{"Available": true, "Degraded": true, "Progressing": false})
@@ -968,5 +973,167 @@ func TestGuestFlowFreshAccessCannotCombineStaleManagementProof(t *testing.T) {
 				t.Fatalf("mixed management/guest identity passed: %+v", a)
 			}
 		})
+	}
+}
+
+func flowHCO(version string, healthy bool, upgradeable bool, methods ...string) map[string]interface{} {
+	h := "healthy"
+	if !healthy {
+		h = "warning"
+	}
+	upg := "True"
+	if !upgradeable {
+		upg = "False"
+	}
+	ms := []interface{}{}
+	for _, m := range methods {
+		ms = append(ms, m)
+	}
+	return map[string]interface{}{
+		"apiVersion": "hco.kubevirt.io/v1beta1",
+		"kind":       "HyperConvergedList",
+		"metadata":   map[string]interface{}{"resourceVersion": "1"},
+		"items": []interface{}{
+			map[string]interface{}{
+				"apiVersion": "hco.kubevirt.io/v1beta1", "kind": "HyperConverged",
+				"spec": map[string]interface{}{"workloadUpdateStrategy": map[string]interface{}{"workloadUpdateMethods": ms}},
+				"metadata": map[string]interface{}{
+					"name":      "kubevirt-hyperconverged",
+					"namespace": "openshift-cnv",
+					"uid":       "hco-uid", "generation": int64(1), "resourceVersion": "1",
+				},
+				"status": map[string]interface{}{
+					"systemHealthStatus": h,
+					"observedGeneration": int64(1),
+					"conditions": []interface{}{
+						map[string]interface{}{"type": "ReconcileComplete", "status": "True"},
+						map[string]interface{}{"type": "Upgradeable", "status": upg},
+						map[string]interface{}{"type": "Available", "status": "True"},
+						map[string]interface{}{"type": "Degraded", "status": "False"},
+						map[string]interface{}{"type": "Progressing", "status": "False"},
+					},
+					"versions": []interface{}{
+						map[string]interface{}{"name": "operator", "version": version},
+					},
+				},
+			},
+		},
+	}
+}
+
+func flowKubeVirt(outdated int, methods ...string) map[string]interface{} {
+	ms := []interface{}{}
+	for _, m := range methods {
+		ms = append(ms, m)
+	}
+	return map[string]interface{}{
+		"apiVersion": "kubevirt.io/v1",
+		"kind":       "KubeVirtList",
+		"metadata":   map[string]interface{}{"resourceVersion": "1"},
+		"items": []interface{}{
+			map[string]interface{}{
+				"apiVersion": "kubevirt.io/v1", "kind": "KubeVirt",
+				"spec": map[string]interface{}{"workloadUpdateStrategy": map[string]interface{}{"workloadUpdateMethods": ms}},
+				"metadata": map[string]interface{}{
+					"name":      "kubevirt-kubevirt-hyperconverged",
+					"namespace": "openshift-cnv",
+					"uid":       "kv-uid", "generation": int64(1), "resourceVersion": "1",
+					"ownerReferences": []interface{}{map[string]interface{}{"apiVersion": "hco.kubevirt.io/v1beta1", "kind": "HyperConverged", "name": "kubevirt-hyperconverged", "uid": "hco-uid"}},
+				},
+				"status": map[string]interface{}{
+					"observedGeneration":      int64(1),
+					"observedKubeVirtVersion": "v1.6.0", "targetKubeVirtVersion": "v1.6.0",
+					"observedDeploymentID": "deployment-1", "targetDeploymentID": "deployment-1",
+					"conditions": []interface{}{map[string]interface{}{"type": "Available", "status": "True"}, map[string]interface{}{"type": "Degraded", "status": "False"}, map[string]interface{}{"type": "Progressing", "status": "False"}},
+					"outdatedVirtualMachineInstanceWorkloads": int64(outdated),
+				},
+			},
+		},
+	}
+}
+
+func TestGuestFlowEUSVirtualizationGate(t *testing.T) {
+	f := newUpgradeFlow(t, true, "Replace", 1, 1)
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/hco.kubevirt.io/v1beta1/hyperconvergeds"] = flowHCO("4.20.0", true, true)
+	f.guest.objects["/apis/kubevirt.io/v1/kubevirts"] = flowKubeVirt(0)
+	f.guest.mu.Unlock()
+
+	f.until(upgradev1.PhaseVerifyingControlPlane)
+	f.publish(f.completeCP())
+
+	setFlowGuestRelease(f.guest, regressionImage("4.21.0"))
+	f.step()
+
+	if f.hcu().Status.Phase != upgradev1.PhaseVerifyingControlPlane {
+		t.Fatalf("expected PhaseVerifyingControlPlane, got %s", f.hcu().Status.Phase)
+	}
+	if a := f.hcu().Status.GuestAssessment; a == nil || a.Reason != "CNVIntermediateVersionMismatch" {
+		t.Fatalf("expected CNVIntermediateVersionMismatch, got %+v", a)
+	}
+
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/hco.kubevirt.io/v1beta1/hyperconvergeds"] = flowHCO("4.21.0", true, true)
+	f.guest.mu.Unlock()
+
+	f.step()
+	if f.hcu().Status.Phase != upgradev1.PhaseUpgradingControlPlane {
+		t.Fatalf("expected PhaseUpgradingControlPlane, got %s", f.hcu().Status.Phase)
+	}
+
+	f.until(upgradev1.PhaseVerifyingControlPlane)
+	f.publish(f.completeCP())
+	setFlowGuestRelease(f.guest, regressionImage("4.22.0"))
+
+	// Methods restored, but HCO is still at 4.21.0 -> target version mismatch!
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/hco.kubevirt.io/v1beta1/hyperconvergeds"] = flowHCO("4.21.0", true, true, "LiveMigrate")
+	f.guest.objects["/apis/kubevirt.io/v1/kubevirts"] = flowKubeVirt(0, "LiveMigrate")
+	f.guest.mu.Unlock()
+
+	f.step()
+	if f.hcu().Status.Phase != upgradev1.PhaseVerifyingControlPlane {
+		t.Fatalf("expected PhaseVerifyingControlPlane, got %s", f.hcu().Status.Phase)
+	}
+	if a := f.hcu().Status.GuestAssessment; a == nil || a.Reason != "CNVTargetVersionMismatch" {
+		t.Fatalf("expected CNVTargetVersionMismatch, got %+v", a)
+	}
+
+	// Target version matched, but workload update methods are still held empty
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/hco.kubevirt.io/v1beta1/hyperconvergeds"] = flowHCO("4.22.0", true, true)
+	f.guest.objects["/apis/kubevirt.io/v1/kubevirts"] = flowKubeVirt(2)
+	f.guest.mu.Unlock()
+
+	f.step()
+	if f.hcu().Status.Phase != upgradev1.PhaseVerifyingControlPlane {
+		t.Fatalf("expected PhaseVerifyingControlPlane, got %s", f.hcu().Status.Phase)
+	}
+	if a := f.hcu().Status.GuestAssessment; a == nil || a.Reason != "CNVWorkloadUpdatesStillHeld" {
+		t.Fatalf("expected CNVWorkloadUpdatesStillHeld, got %+v", a)
+	}
+
+	// GitOps restores workloadUpdateMethods, but workloads are still migrating (outdated > 0)
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/hco.kubevirt.io/v1beta1/hyperconvergeds"] = flowHCO("4.22.0", true, true, "LiveMigrate")
+	f.guest.objects["/apis/kubevirt.io/v1/kubevirts"] = flowKubeVirt(2, "LiveMigrate")
+	f.guest.mu.Unlock()
+
+	f.step()
+	if f.hcu().Status.Phase != upgradev1.PhaseVerifyingControlPlane {
+		t.Fatalf("expected PhaseVerifyingControlPlane, got %s", f.hcu().Status.Phase)
+	}
+	if a := f.hcu().Status.GuestAssessment; a == nil || a.Reason != "CNVOutdatedWorkloads" {
+		t.Fatalf("expected CNVOutdatedWorkloads, got %+v", a)
+	}
+
+	// Workload migrations complete (outdated == 0)
+	f.guest.mu.Lock()
+	f.guest.objects["/apis/kubevirt.io/v1/kubevirts"] = flowKubeVirt(0, "LiveMigrate")
+	f.guest.mu.Unlock()
+
+	f.step()
+	if f.hcu().Status.Phase != upgradev1.PhaseUpgradingNodePools {
+		t.Fatalf("expected PhaseUpgradingNodePools, got %s: %+v", f.hcu().Status.Phase, f.hcu().Status)
 	}
 }

@@ -21,6 +21,7 @@ All alerting configurations are natively managed and deployed via Kustomize. SRE
 | **HypershiftUpgradeGuestMaintenanceDegraded** | Maintenance ready = 0, relevant phase | **Warning, 10m** | Renewal/bootstrap is failing; an existing valid token can still work until expiry. |
 | **HypershiftUpgradeGuestReadStale** | Last scoped collection older than 120s or never, relevant phase | **Warning, 5m** | Collection freshness failure, not proof of guest ill health. |
 | **HypershiftUpgradeGuestAssessmentBlocked** | Hard failure/unknown/stale purpose verdict, relevant phase | **Warning, 10m** | Inspect the latest purpose-specific assessment; healthy progression alone is not alerted. |
+| **HypershiftUpgradeGuestVirtualizationBlocked** | Operator blocker for `openshift-virtualization`, relevant phase | **Warning, 15m** | OpenShift Virtualization is blocking cluster upgrade (e.g. outdated workloads, unaligned version, unheld update methods). Inspect `status.guestAssessment`. |
 
 Guest alerts are intersected with phases 2-5 or 7 using `and on(namespace, name)`:
 preflight/schedule, control-plane rollout/verification, workers and Blocked.

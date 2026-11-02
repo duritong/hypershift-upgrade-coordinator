@@ -18,7 +18,7 @@ The `HostedClusterUpgrade` Custom Resource Definition (CRD) completely simplifie
 *   **Pool Concurrency Limits:** Cap concurrent NodePool rollouts within the active group via `rolloutPolicy.maxParallelNodePools` (default one). This is a pool count, not a node disruption or capacity budget; per-pool rollout settings, replica counts, workload placement, and PDBs still matter.
 *   **Granular Pause & Resume Support:** Features both coordinator-level pausing (via `pausedUntil`, which supports indefinite pausing with `"true"` or scheduled pausing with an RFC3339 timestamp) and object-level control using HyperShift's native `spec.pausedUntil` fields.
 *   **Fleet-Wide Management & Dynamic Namespace Discovery:** Operates as a cluster-scoped fleet controller on the management cluster, automatically managing upgrades across dynamically provisioned clusters and their control planes, with optional namespace filtering via `--hosted-cluster-namespace`.
-*   **Mandatory Scoped Guest Verification (Implemented, Unreleased):** Fresh direct ClusterVersion/all-current-ClusterOperator evidence gates new actions and final completion, alongside management proofs. Scoped tokens are bootstrapped/rotated by an independent in-process controller. No check skips, exclusions or force/bypass flags are available; firing-alert querying remains deferred. Deploy the new CRD, RBAC and image together and configure [guest access/network prerequisites](docs/user-guide.md#mandatory-guest-access-unreleased).
+*   **Mandatory Scoped Guest Verification:** Fresh direct ClusterVersion, all-current-ClusterOperator, and OpenShift Virtualization evidence gates new actions and final completion, alongside management proofs. Scoped tokens are bootstrapped/rotated by an independent in-process controller. No check skips, exclusions or force/bypass flags are available; firing-alert querying remains deferred. See [Guest Cluster Observation](docs/guest-observation.md).
 *   **GitOps & ArgoCD Friendly:** Merge upgrades upfront and stagger control-plane and worker-group starts. ArgoCD needs both `ignoreDifferences` and `RespectIgnoreDifferences=true` to preserve coordinator-owned live fields during later syncs; creation still applies bootstrap values from Git. See the [GitOps guide](docs/gitops.md).
 
 ---
@@ -119,6 +119,8 @@ Detailed designs, guides, and specifications can be found in the `docs/` folder:
 * **[North Star Vision](docs/vision.md):** Proactive SRE vision, core pillars (staggered scheduling, zero-trust verification, readiness dashboards), and operational context.
 * **[Architecture & Design Doc](docs/architecture.md):** Detailed explanation of the state machine scheduling gates, Extended Update Support (EUS) mechanics, group-based NodePool sequence unpausing, multi-namespace least-privilege security model, and pause/resume execution.
 * **[CRD Specification](docs/crd.md):** The Custom Resource schema (`HostedClusterUpgrade`), including spec configuration knobs and status telemetry fields.
+* **[Guest Cluster Observation](docs/guest-observation.md):** Scoped access lifecycle, token rotation, and health assessment gates for in-tree ClusterOperators.
+* **[OpenShift Virtualization Assessment](docs/virtualization-assessment.md):** Dedicated safety gates for OpenShift Virtualization health, version alignment, and live-migration readiness.
 * **[Monitoring & Alerting](docs/monitoring.md):** Specification of Prometheus alerts (`PrometheusRule` custom resources) and SRE Grafana dashboard layouts.
 
 ---

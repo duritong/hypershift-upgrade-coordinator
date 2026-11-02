@@ -30,6 +30,14 @@ func guestRelease(image string) guest.Release {
 // network read, then checks its age at the action boundary. No healthy bool or
 // persisted admission is consulted as authorization.
 func (r *HostedClusterUpgradeReconciler) guestGate(ctx context.Context, hcu *upgradev1.HostedClusterUpgrade, hc *unstructured.Unstructured, expected string, policy guest.Policy) (guest.Target, error) {
+	if hcu.Spec.IntermediateReleaseImage != "" {
+		if !samePayload(expected, hcu.Spec.TargetReleaseImage) {
+			policy.HoldVirtualizationWorkloads = true
+			policy.AllowIntermediateWorkloadSkew = samePayload(expected, hcu.Spec.IntermediateReleaseImage)
+		} else if policy.Purpose == guest.WorkerEntry || policy.Purpose == guest.FinalUpgradeVerification {
+			policy.RequireRestoredWorkloads = true
+		}
+	}
 	var target guest.Target
 	var snapshot guest.Snapshot
 	var result guest.Result
@@ -103,6 +111,9 @@ func (r *HostedClusterUpgradeReconciler) guestGate(ctx context.Context, hcu *upg
 	}
 	for _, op := range result.Operators {
 		status.Operators = append(status.Operators, upgradev1.GuestOperatorSummary{Name: op.Name, Version: op.Version})
+	}
+	if op := result.Virtualization; op != nil {
+		status.Virtualization = &upgradev1.GuestOperatorSummary{Name: op.Name, Version: op.Version}
 	}
 	for _, b := range result.Blockers {
 		status.Blockers = append(status.Blockers, upgradev1.GuestBlocker{Operator: b.Operator, Reason: b.Reason})

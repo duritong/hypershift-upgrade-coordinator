@@ -460,6 +460,19 @@ spec:
                     type: string
                   truncated:
                     type: boolean
+                  virtualization:
+                    description: Virtualization is separate from the bounded ALL-current-CO
+                      inventory.
+                    properties:
+                      name:
+                        maxLength: 253
+                        type: string
+                      version:
+                        maxLength: 128
+                        type: string
+                    required:
+                    - name
+                    type: object
                 required:
                 - blockerCount
                 - lastAttemptTime

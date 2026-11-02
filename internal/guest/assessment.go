@@ -184,6 +184,9 @@ func Assess(s Snapshot, current Target, policy Policy, now time.Time) Result {
 		}
 		r.Operators = append(r.Operators, OperatorSummary{Name: co.Name, Version: version})
 	}
+
+	r.Virtualization = assessVirtualization(s.Virtualization, current.Expected, policy, add)
+
 	if observing && r.State == Ready {
 		r.State, r.Reason = Converging, "ObservationOnly"
 	}

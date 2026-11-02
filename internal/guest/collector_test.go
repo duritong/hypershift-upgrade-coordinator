@@ -117,6 +117,8 @@ func TestRESTCollectionTLSAndPagination(t *testing.T) {
 			} else {
 				writeJSON(w, page(s.Operators, "20", "next-token"))
 			}
+		case "/apis/hco.kubevirt.io/v1/hyperconvergeds", "/apis/hco.kubevirt.io/v1beta1/hyperconvergeds", "/apis/hco.kubevirt.io":
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected REST path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -127,8 +129,8 @@ func TestRESTCollectionTLSAndPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 4 || len(snapshot.Operators) != 2 {
-		t.Fatalf("not CV/list/list/CV: calls=%d snapshot=%+v", calls.Load(), snapshot)
+	if calls.Load() != 7 || len(snapshot.Operators) != 2 {
+		t.Fatalf("not CV/list/list/CNV/CV: calls=%d snapshot=%+v", calls.Load(), snapshot)
 	}
 	if verdict := Assess(snapshot, target(), Policy{Purpose: WorkerEntry}, testNow); verdict.State != Ready {
 		t.Fatalf("healthy real REST snapshot rejected: %+v", verdict)
@@ -141,6 +143,10 @@ func TestCollectionRejectsIncompleteEvidence(t *testing.T) {
 			s := healthySnapshot()
 			var cvReads atomic.Int32
 			_, data := guestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/apis/hco.kubevirt.io") {
+					http.NotFound(w, r)
+					return
+				}
 				if r.URL.Path == apiPath+"clusterversions/version" {
 					v := *s.Version.DeepCopy()
 					if cvReads.Add(1) > 1 {
@@ -310,6 +316,10 @@ func TestNamedServingCertificateSelection(t *testing.T) {
 	cert, ca := servingCertificate(t)
 	var selected atomic.Bool
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/apis/hco.kubevirt.io") {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == apiPath+"clusterversions/version" {
 			writeJSON(w, s.Version)
 		} else {
@@ -398,6 +408,10 @@ func TestRESTDynamicAddRemoveAndFreshCVFailure(t *testing.T) {
 	bad.UID = "added-uid"
 	setCondition(&bad.Status.Conditions, "Degraded", "True")
 	_, data := guestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/apis/hco.kubevirt.io") {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == apiPath+"clusterversions/version" {
 			v := *s.Version.DeepCopy()
 			if stage.Load() == 4 {
@@ -430,5 +444,129 @@ func TestRESTDynamicAddRemoveAndFreshCVFailure(t *testing.T) {
 		if verdict.State != want {
 			t.Fatalf("stage %d: %+v", i, verdict)
 		}
+	}
+}
+
+func TestRESTCollectionVirtualization(t *testing.T) {
+	s := healthySnapshot()
+	for _, mode := range []string{"healthy", "outdated-workloads", "not-installed", "forbidden", "server-error", "duplicate-json"} {
+		t.Run(mode, func(t *testing.T) {
+			_, data := guestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case apiPath + "clusterversions/version":
+					writeJSON(w, s.Version)
+				case apiPath + "clusteroperators":
+					writeJSON(w, page(s.Operators, "20", ""))
+				case "/apis/hco.kubevirt.io/v1beta1/hyperconvergeds":
+					switch mode {
+					case "not-installed":
+						http.NotFound(w, r)
+					case "forbidden":
+						http.Error(w, "forbidden", http.StatusForbidden)
+					case "server-error":
+						http.Error(w, "internal server error", http.StatusInternalServerError)
+					case "duplicate-json":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"items":[{"metadata":{"name":"kubevirt-hyperconverged"},"metadata":{"name":"duplicate"}}]}`)
+					default:
+						writeJSON(w, map[string]any{
+							"apiVersion": "hco.kubevirt.io/v1beta1",
+							"kind":       "HyperConvergedList",
+							"metadata":   map[string]any{"resourceVersion": "1"},
+							"items": []any{
+								map[string]any{
+									"apiVersion": "hco.kubevirt.io/v1beta1", "kind": "HyperConverged",
+									"metadata": map[string]any{
+										"name":      "kubevirt-hyperconverged",
+										"namespace": "openshift-cnv",
+										"uid":       "hco-uid", "generation": 1, "resourceVersion": "1",
+									},
+									"status": map[string]any{
+										"systemHealthStatus": "healthy",
+										"observedGeneration": 1,
+										"conditions": []any{
+											map[string]any{"type": "ReconcileComplete", "status": "True"},
+											map[string]any{"type": "Upgradeable", "status": "True"},
+											map[string]any{"type": "Available", "status": "True"},
+											map[string]any{"type": "Degraded", "status": "False"},
+											map[string]any{"type": "Progressing", "status": "False"},
+										},
+										"versions": []any{
+											map[string]any{"name": "operator", "version": "4.20.1"},
+										},
+									},
+								},
+							},
+						})
+					}
+				case "/apis/kubevirt.io/v1/kubevirts":
+					outdated := 0
+					if mode == "outdated-workloads" {
+						outdated = 3
+					}
+					writeJSON(w, map[string]any{
+						"apiVersion": "kubevirt.io/v1",
+						"kind":       "KubeVirtList",
+						"metadata":   map[string]any{"resourceVersion": "1"},
+						"items": []any{
+							map[string]any{
+								"apiVersion": "kubevirt.io/v1", "kind": "KubeVirt",
+								"metadata": map[string]any{
+									"name":      "kubevirt-kubevirt-hyperconverged",
+									"namespace": "openshift-cnv",
+									"uid":       "kv-uid", "generation": 1, "resourceVersion": "1",
+									"ownerReferences": []any{map[string]any{"apiVersion": "hco.kubevirt.io/v1beta1", "kind": "HyperConverged", "name": "kubevirt-hyperconverged", "uid": "hco-uid"}},
+								},
+								"status": map[string]any{
+									"observedGeneration":      1,
+									"observedKubeVirtVersion": "v1.6.0", "targetKubeVirtVersion": "v1.6.0",
+									"observedDeploymentID": "deployment-1", "targetDeploymentID": "deployment-1",
+									"conditions": []any{map[string]any{"type": "Available", "status": "True"}, map[string]any{"type": "Degraded", "status": "False"}, map[string]any{"type": "Progressing", "status": "False"}},
+									"outdatedVirtualMachineInstanceWorkloads": outdated,
+								},
+							},
+						},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+			snapshot, err := reader(t, data).Collect(context.Background())
+			switch mode {
+			case "forbidden":
+				requireFailure(t, err, AccessDenied, "ObserverDenied")
+			case "server-error":
+				requireFailure(t, err, Unavailable, "GuestHTTPError")
+			case "duplicate-json":
+				requireFailure(t, err, UnsupportedEvidence, "MalformedJSON")
+			case "not-installed":
+				if err != nil {
+					t.Fatalf("not-installed should pass: %v", err)
+				}
+				if snapshot.Virtualization != nil {
+					t.Fatalf("expected nil Virtualization, got %+v", snapshot.Virtualization)
+				}
+			case "healthy":
+				if err != nil {
+					t.Fatalf("healthy collection failed: %v", err)
+				}
+				if snapshot.Virtualization == nil || !snapshot.Virtualization.Present {
+					t.Fatalf("expected present Virtualization, got %+v", snapshot.Virtualization)
+				}
+				if snapshot.Virtualization.SystemHealthStatus != "healthy" || snapshot.Virtualization.OperatorVersion != "4.20.1" || snapshot.Virtualization.OutdatedWorkloads != 0 {
+					t.Fatalf("unexpected Virtualization values: %+v", snapshot.Virtualization)
+				}
+				if snapshot.Virtualization.Conditions["Upgradeable"] != configv1.ConditionTrue {
+					t.Fatalf("expected Upgradeable=True, got %+v", snapshot.Virtualization.Conditions)
+				}
+			case "outdated-workloads":
+				if err != nil {
+					t.Fatalf("outdated-workloads collection failed: %v", err)
+				}
+				if snapshot.Virtualization == nil || snapshot.Virtualization.OutdatedWorkloads != 3 {
+					t.Fatalf("expected OutdatedWorkloads=3, got %+v", snapshot.Virtualization)
+				}
+			}
+		})
 	}
 }

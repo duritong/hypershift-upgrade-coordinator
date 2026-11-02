@@ -106,9 +106,10 @@ This is a namespace inside each hosted cluster, not HUC's management-cluster
 and owns it; existing unowned or shared namespaces are not adopted. The
 ServiceAccount, ClusterRole and binding names remain `huc-guest-observer`.
 They are tagged with HC UID, cluster ID and profile revision;
-unowned/conflicting resources are refused. The guest role grants **only** `get`
-on `config.openshift.io/clusterversions` named `version` and `list` on all
-`clusteroperators`. It grants no guest Secret/workload access, mutations or watches.
+unowned/conflicting resources are refused. The guest role grants strictly read-only
+access: `get` on `config.openshift.io/clusterversions` named `version`, and `list` on
+`clusteroperators`, `hyperconvergeds` (`hco.kubevirt.io`), and `kubevirts` (`kubevirt.io`).
+It grants no guest Secret, pod, workload mutation, or watch permissions.
 Owned profile drift is repaired only while active.
 
 Changing this flag invalidates old observer connections and provisions the new
@@ -256,8 +257,9 @@ removed operators disappear on the next complete snapshot, including their
 blockers/metrics. An empty/partial list never passes. This cannot prove that an
 independently expected operator is present. Successful reads prove collection
 freshness, not an operator heartbeat. Monitoring CO health **does not query firing
-alerts**; alert querying is explicitly deferred. No guest operator/OLM execution,
-intermediate worker upgrades, or Virtualization-specific checks are implemented.
+alerts**; alert querying is explicitly deferred. No guest operator/OLM execution
+or intermediate worker upgrades are implemented. OpenShift Virtualization has
+additional mandatory, read-only [assessment gates](virtualization-assessment.md).
 
 ---
 

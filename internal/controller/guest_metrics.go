@@ -55,6 +55,8 @@ func guestMetricReason(reason string) string {
 	switch reason {
 	case "GuestReady", "ObservationOnly", "OperatorVersionMismatch", "CVFailing", "CVDegraded", "CVProgressing", "CVLatestNotCompleted", "CVDesiredReleaseMismatch", "COAvailable", "CODegraded", "COProgressing", "COUpgradeNotAllowed", "CredentialExpired", "StaleOrIncompleteSnapshot", "TargetChanged", "MissingOrMalformedOperatorVersion":
 		return reason
+	case "CNVUnsupportedAPI", "CNVMalformedEvidence", "CNVObservationConflict", "CNVStaleGeneration", "CNVKubeVirtConverging", "CNVHealthUnknown", "CNVSystemUnhealthy", "CNVConditionsUnknown", "CNVNotAvailable", "CNVDegraded", "CNVProgressing", "CNVReconcileIncomplete", "CNVNotUpgradeable", "CNVWorkloadsUnknown", "CNVOutdatedWorkloads", "CNVWorkloadUpdatesNotHeld", "CNVWorkloadUpdatesStillHeld", "CNVVersionMismatch", "CNVIntermediateVersionMismatch", "CNVTargetVersionMismatch":
+		return reason
 	default:
 		return "Other"
 	}

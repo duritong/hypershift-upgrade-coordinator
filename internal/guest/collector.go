@@ -92,6 +92,13 @@ func (r *Reader) Collect(ctx context.Context) (Snapshot, error) {
 	if len(s.Operators) == 0 {
 		return Snapshot{}, &Failure{UnsupportedEvidence, "EmptyOperatorList"}
 	}
+
+	virt, err := r.collectVirtualization(ctx, &remaining)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.Virtualization = virt
+
 	if err := r.get(ctx, "clusterversions/version", nil, &after, &remaining); err != nil {
 		return Snapshot{}, err
 	}
@@ -113,11 +120,16 @@ func (r *Reader) Collect(ctx context.Context) (Snapshot, error) {
 }
 
 func (r *Reader) get(ctx context.Context, resource string, query url.Values, out any, remaining *int64) error {
+	_, err := r.getAbs(ctx, apiPath+resource, query, out, remaining, false)
+	return err
+}
+
+func (r *Reader) getAbs(ctx context.Context, absPath string, query url.Values, out any, remaining *int64, allowNotFound bool) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	budget := &byteBudget{remaining: remaining}
 	ctx = context.WithValue(ctx, budgetKey{}, budget)
-	req := r.client.Get().AbsPath(apiPath+resource).SetHeader("Accept", "application/json").MaxRetries(0)
+	req := r.client.Get().AbsPath(absPath).SetHeader("Accept", "application/json").MaxRetries(0)
 	for key, values := range query {
 		for _, value := range values {
 			req.Param(key, value)
@@ -126,29 +138,32 @@ func (r *Reader) get(ctx context.Context, resource string, query url.Values, out
 	bodyStream, err := req.Stream(ctx)
 	if err != nil {
 		if budget.exceeded {
-			return &Failure{UnsupportedEvidence, "ByteLimit"}
+			return false, &Failure{UnsupportedEvidence, "ByteLimit"}
+		}
+		if budget.status == http.StatusNotFound && allowNotFound {
+			return false, nil
 		}
 		if budget.status == http.StatusUnauthorized || budget.status == http.StatusForbidden {
-			return &Failure{AccessDenied, "ObserverDenied"}
+			return false, &Failure{AccessDenied, "ObserverDenied"}
 		}
 		if budget.status != 0 && budget.status != http.StatusOK {
-			return &Failure{Unavailable, "GuestHTTPError"}
+			return false, &Failure{Unavailable, "GuestHTTPError"}
 		}
-		return contextFailure(ctx.Err())
+		return false, contextFailure(ctx.Err())
 	}
 	defer bodyStream.Close()
 	body, err := io.ReadAll(bodyStream)
 	if budget.exceeded {
-		return &Failure{UnsupportedEvidence, "ByteLimit"}
+		return false, &Failure{UnsupportedEvidence, "ByteLimit"}
 	}
 	if err != nil {
-		return contextFailure(ctx.Err())
+		return false, contextFailure(ctx.Err())
 	}
 	strict, err := strictjson.UnmarshalStrict(body, out, strictjson.DisallowDuplicateFields)
 	if err != nil || len(strict) != 0 {
-		return &Failure{UnsupportedEvidence, "MalformedJSON"}
+		return false, &Failure{UnsupportedEvidence, "MalformedJSON"}
 	}
-	return nil
+	return true, nil
 }
 
 type budgetKey struct{}

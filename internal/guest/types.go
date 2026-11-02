@@ -7,6 +7,7 @@ import (
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -60,6 +61,15 @@ const (
 type Policy struct {
 	Purpose     Purpose
 	NextRelease Release
+	// HoldVirtualizationWorkloads requires externally disabled automatic workload
+	// updates during the control-plane-only portion of an intermediate path.
+	HoldVirtualizationWorkloads bool
+	// Set only when the management-verified current payload is the intermediate
+	// release, including adoption of a hop completed before this coordinator run.
+	AllowIntermediateWorkloadSkew bool
+	// RequireRestoredWorkloads validates that automatic workload update methods
+	// have been restored after an intermediate control-plane-only update.
+	RequireRestoredWorkloads bool
 }
 
 type State string
@@ -89,8 +99,27 @@ type Snapshot struct {
 	StartedAt, CompletedAt time.Time
 	Version                configv1.ClusterVersion
 	Operators              []configv1.ClusterOperator
+	Virtualization         *VirtualizationSnapshot
 	ListRevision           string
 	complete               bool
+}
+
+// VirtualizationSnapshot captures observed OpenShift Virtualization health,
+// upgradeability, version and workload status if deployed in the cluster.
+type VirtualizationSnapshot struct {
+	Present                                           bool
+	Name                                              string
+	Namespace                                         string
+	SystemHealthStatus                                string
+	Conditions                                        map[string]configv1.ConditionStatus
+	OperatorVersion                                   string
+	OutdatedWorkloads                                 int
+	WorkloadsObserved                                 bool
+	HCO, KubeVirt                                     metav1.ObjectMeta
+	HCOObservedGeneration, KubeVirtObservedGeneration int64
+	KubeVirtConverged                                 bool
+	WorkloadMethodsObserved                           bool
+	HCOMethods, KubeVirtMethods                       []string
 }
 
 type Blocker struct {
@@ -99,12 +128,13 @@ type Blocker struct {
 }
 type OperatorSummary struct{ Name, Version string }
 type Result struct {
-	State        State
-	Reason       string
-	Operators    []OperatorSummary
-	Blockers     []Blocker
-	BlockerCount int
-	Truncated    bool
+	State          State
+	Reason         string
+	Operators      []OperatorSummary
+	Blockers       []Blocker
+	BlockerCount   int
+	Truncated      bool
+	Virtualization *OperatorSummary
 }
 
 func (t Target) valid() bool {

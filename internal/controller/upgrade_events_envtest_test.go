@@ -71,8 +71,10 @@ var _ = Describe("Primary upgrade event filtering", func() {
 			}
 			if r.URL.Path == "/apis/config.openshift.io/v1/clusterversions/version" {
 				_ = json.NewEncoder(w).Encode(version)
-			} else {
+			} else if r.URL.Path == "/apis/config.openshift.io/v1/clusteroperators" {
 				_ = json.NewEncoder(w).Encode(configv1.ClusterOperatorList{TypeMeta: metav1.TypeMeta{Kind: "ClusterOperatorList", APIVersion: "config.openshift.io/v1"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: operators})
+			} else {
+				http.NotFound(w, r)
 			}
 		}))
 		defer server.Close()
@@ -193,8 +195,10 @@ var _ = Describe("Primary upgrade fleet parallelism", func() {
 				}
 				if request.URL.Path == "/apis/config.openshift.io/v1/clusterversions/version" {
 					_ = json.NewEncoder(w).Encode(version)
-				} else {
+				} else if request.URL.Path == "/apis/config.openshift.io/v1/clusteroperators" {
 					_ = json.NewEncoder(w).Encode(configv1.ClusterOperatorList{TypeMeta: metav1.TypeMeta{Kind: "ClusterOperatorList", APIVersion: "config.openshift.io/v1"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: operators})
+				} else {
+					http.NotFound(w, request)
 				}
 			}))
 			DeferCleanup(server.Close)

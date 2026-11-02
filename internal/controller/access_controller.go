@@ -173,8 +173,11 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 	if err != nil && !apierrors.IsNotFound(err) {
 		return 0, accessFailure("DeliveryReadFailed")
 	}
-	if exists && !deliveryOwned(secret, s) {
+	if exists && !deliveryIdentityOwned(secret, s) {
 		return 0, accessFailure("DeliveryOwnershipConflict")
+	}
+	if exists && !deliveryOwned(secret, s) && s.paused {
+		return 0, accessFailure("PausedProfileMigrationDeferred")
 	}
 	if s.paused && !exists {
 		return 0, accessFailure("PausedBootstrapDeferred")
@@ -182,7 +185,7 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 	if exists && s.paused && !r.deliveryNamespaceMatches(secret) {
 		return 0, accessFailure("PausedNamespaceChangeDeferred")
 	}
-	if exists && r.deliveryNamespaceMatches(secret) && secret.Annotations[accessPrefix+"endpoint-revision"] == revision {
+	if exists && deliveryOwned(secret, s) && r.deliveryNamespaceMatches(secret) && secret.Annotations[accessPrefix+"endpoint-revision"] == revision {
 		exp, err := time.Parse(time.RFC3339, secret.Annotations[accessPrefix+"expires-at"])
 		renewAt, renewalErr := time.Parse(time.RFC3339, secret.Annotations[accessPrefix+"renew-at"])
 		scoped, configErr := guest.ScopedConfig(secret.Data["kubeconfig"])
@@ -256,7 +259,7 @@ func (r *GuestAccessReconciler) maintain(ctx context.Context, s *accessSource) (
 	latest := &corev1.Secret{}
 	err = r.APIReader.Get(ctx, key, latest)
 	if exists {
-		if err != nil || latest.UID != secret.UID || latest.ResourceVersion != secret.ResourceVersion || !deliveryOwned(latest, s) {
+		if err != nil || latest.UID != secret.UID || latest.ResourceVersion != secret.ResourceVersion || !deliveryIdentityOwned(latest, s) {
 			return 0, accessFailure("DeliveryChanged")
 		}
 	} else if !apierrors.IsNotFound(err) {
@@ -364,6 +367,8 @@ func observerProfile(s *accessSource, namespace string) []profileObject {
 		{&rbacv1.ClusterRole{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRole"}, ObjectMeta: metadata(""), Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusterversions"}, ResourceNames: []string{"version"}, Verbs: []string{"get"}},
 			{APIGroups: []string{"config.openshift.io"}, Resources: []string{"clusteroperators"}, Verbs: []string{"list"}},
+			{APIGroups: []string{"hco.kubevirt.io"}, Resources: []string{"hyperconvergeds"}, Verbs: []string{"list"}},
+			{APIGroups: []string{"kubevirt.io"}, Resources: []string{"kubevirts"}, Verbs: []string{"list"}},
 		}}, rbacv1.SchemeGroupVersion.WithResource("clusterroles"), []string{"rules", "aggregationRule"}},
 		{&rbacv1.ClusterRoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "ClusterRoleBinding"}, ObjectMeta: metadata(""), RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: GuestObserverName}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: GuestObserverName, Namespace: namespace}}}, rbacv1.SchemeGroupVersion.WithResource("clusterrolebindings"), []string{"roleRef", "subjects"}},
 	}
@@ -377,7 +382,7 @@ func observerProfile(s *accessSource, namespace string) []profileObject {
 
 func profileOwned(obj *unstructured.Unstructured, s *accessSource) bool {
 	a := obj.GetAnnotations()
-	return obj.GetLabels()[GuestAccessLabel] == "true" && a[accessPrefix+"hc-uid"] == string(s.hc.GetUID()) && a[accessPrefix+"cluster-id"] == s.clusterID && a[accessPrefix+"profile"] == GuestObserverProfile && obj.GetDeletionTimestamp().IsZero() && len(obj.GetOwnerReferences()) == 0
+	return obj.GetLabels()[GuestAccessLabel] == "true" && a[accessPrefix+"hc-uid"] == string(s.hc.GetUID()) && a[accessPrefix+"cluster-id"] == s.clusterID && recognizedObserverProfile(a[accessPrefix+"profile"]) && obj.GetDeletionTimestamp().IsZero() && len(obj.GetOwnerReferences()) == 0
 }
 
 func (r *GuestAccessReconciler) profile(ctx context.Context, s *accessSource, d dynamic.Interface, repair bool) (*unstructured.Unstructured, error) {
@@ -394,7 +399,12 @@ func (r *GuestAccessReconciler) profile(ctx context.Context, s *accessSource, d 
 			if !profileOwned(actual, s) {
 				return nil, accessFailure("ProfileOwnershipConflict")
 			}
-			changed := false
+			changed := actual.GetAnnotations()[accessPrefix+"profile"] != GuestObserverProfile
+			if changed {
+				annotations := actual.GetAnnotations()
+				annotations[accessPrefix+"profile"] = GuestObserverProfile
+				actual.SetAnnotations(annotations)
+			}
 			immutableRoleRefChanged := desired.gvr.Resource == "clusterrolebindings" && !reflect.DeepEqual(actual.Object["roleRef"], desired.object.Object["roleRef"])
 			for _, field := range desired.fields {
 				if !reflect.DeepEqual(actual.Object[field], desired.object.Object[field]) {
@@ -430,7 +440,7 @@ func (r *GuestAccessReconciler) profile(ctx context.Context, s *accessSource, d 
 		if err != nil {
 			return nil, accessFailure("ProfileUnavailable")
 		}
-		if !profileOwned(actual, s) || actual.GetUID() == "" {
+		if !profileOwned(actual, s) || actual.GetAnnotations()[accessPrefix+"profile"] != GuestObserverProfile || actual.GetUID() == "" {
 			return nil, accessFailure("ProfileOwnershipConflict")
 		}
 		if desired.gvr.Resource == "serviceaccounts" {
@@ -453,7 +463,7 @@ func (r *GuestAccessReconciler) cleanup(ctx context.Context, key client.ObjectKe
 	}
 	for _, item := range list.Items {
 		a := item.Annotations
-		if a[accessPrefix+"source-namespace"] != key.Namespace || a[accessPrefix+"source-name"] != key.Name || a[accessPrefix+"hcu-uid"] == "" || a[accessPrefix+"hc-uid"] == "" || a[accessPrefix+"profile"] != GuestObserverProfile || item.Name != deliveryName(types.UID(a[accessPrefix+"hc-uid"])) || len(item.OwnerReferences) != 0 {
+		if a[accessPrefix+"source-namespace"] != key.Namespace || a[accessPrefix+"source-name"] != key.Name || a[accessPrefix+"hcu-uid"] == "" || a[accessPrefix+"hc-uid"] == "" || !recognizedObserverProfile(a[accessPrefix+"profile"]) || item.Name != deliveryName(types.UID(a[accessPrefix+"hc-uid"])) || len(item.OwnerReferences) != 0 {
 			continue
 		}
 		current := &corev1.Secret{}

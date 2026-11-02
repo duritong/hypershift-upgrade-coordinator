@@ -58,6 +58,7 @@ type accessGuestFixture struct {
 	version                                   *configv1.ClusterVersion
 	operators                                 []configv1.ClusterOperator
 	onObserverRead                            func()
+	onObserverReadPath                        func(string)
 	holdObserver                              bool
 	server                                    *httptest.Server
 }
@@ -85,6 +86,9 @@ func (g *accessGuestFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if g.onObserverRead != nil {
 			g.onObserverRead()
+		}
+		if g.onObserverReadPath != nil {
+			g.onObserverReadPath(r.URL.Path)
 		}
 		if g.denyObserver {
 			deny(403)
@@ -277,7 +281,7 @@ func TestGuestAccessBootstrapAndRotation(t *testing.T) {
 	}
 	role := g.objects["/apis/rbac.authorization.k8s.io/v1/clusterroles/"+GuestObserverName]
 	rules := role["rules"].([]interface{})
-	if len(rules) != 2 || accessHash(rules) != accessHash(observerProfile(&accessSource{hc: &unstructured.Unstructured{}}, GuestObserverNamespace)[2].object.Object["rules"]) {
+	if len(rules) != 4 || accessHash(rules) != accessHash(observerProfile(&accessSource{hc: &unstructured.Unstructured{}}, GuestObserverNamespace)[2].object.Object["rules"]) {
 		t.Fatalf("unexpected role: %v", role)
 	}
 	expected := guest.Release{Version: "4.18.1", Image: "quay.io/ocp/release:4.18.1-x86_64@sha256:" + strings.Repeat("a", 64)}

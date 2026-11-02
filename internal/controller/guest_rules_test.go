@@ -35,6 +35,7 @@ func TestGuestAlertRules(t *testing.T) {
 		"HypershiftUpgradeGuestMaintenanceDegraded":   `(hypershift_upgrade_guest_access_maintenance_ready == 0)` + active,
 		"HypershiftUpgradeGuestReadStale":             `(time() - hypershift_upgrade_guest_last_successful_observation_timestamp_seconds > 120)` + active,
 		"HypershiftUpgradeGuestAssessmentBlocked":     `(hypershift_upgrade_guest_assessment{state=~"Unhealthy|Unavailable|AccessDenied|IdentityMismatch|UnsupportedEvidence|Stale|Invalidated|NotAssessed|Unknown"} == 1)` + active,
+		"HypershiftUpgradeGuestVirtualizationBlocked": `(hypershift_upgrade_guest_operator_blocker{operator="openshift-virtualization"} == 1)` + active,
 	}
 	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	for _, group := range document.Spec.Groups {

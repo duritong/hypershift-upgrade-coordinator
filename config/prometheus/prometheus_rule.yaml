@@ -39,6 +39,14 @@ spec:
       annotations:
         summary: "Guest purpose assessment cannot pass"
         description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' reports {{ $labels.state }} for {{ $labels.purpose }} ({{ $labels.reason }}). Inspect guestAssessment; delegated rollouts are not cancelled. This does not query guest firing alerts."
+    - alert: HypershiftUpgradeGuestVirtualizationBlocked
+      expr: (hypershift_upgrade_guest_operator_blocker{operator="openshift-virtualization"} == 1) and on(namespace, name) (((hypershift_upgrade_phase >= 2) and (hypershift_upgrade_phase <= 5)) or (hypershift_upgrade_phase == 7))
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "OpenShift Virtualization is blocking cluster upgrade"
+        description: "HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' is blocked by OpenShift Virtualization during {{ $labels.purpose }} (reason: {{ $labels.reason }}). Inspect status.guestAssessment for details."
     - alert: HypershiftUpgradeCoordinatorBlocked
       expr: hypershift_upgrade_phase == 7
       for: 15m

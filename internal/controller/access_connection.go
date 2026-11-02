@@ -33,7 +33,7 @@ const (
 	GuestEndpointPublished = "published"
 	GuestAccessLabel       = "upgrade.huc.0xshift.dev/guest-observer"
 	accessPrefix           = "upgrade.huc.0xshift.dev/"
-	GuestObserverProfile   = "observer-v1"
+	GuestObserverProfile   = "observer-v2"
 	GuestObserverNamespace = "huc-guest-observer"
 	GuestObserverName      = "huc-guest-observer"
 )
@@ -261,8 +261,17 @@ func (p *GuestAccessProvider) endpoint(ctx context.Context, s *accessSource) (*r
 
 func deliveryName(uid types.UID) string { return "guest-observer-" + string(uid) }
 func deliveryOwned(secret *corev1.Secret, s *accessSource) bool {
+	return deliveryIdentityOwned(secret, s) && secret.Annotations[accessPrefix+"profile"] == GuestObserverProfile
+}
+
+func recognizedObserverProfile(profile string) bool {
+	return profile == GuestObserverProfile || profile == "observer-v1"
+}
+
+// A known old profile may be migrated, but is never usable action evidence.
+func deliveryIdentityOwned(secret *corev1.Secret, s *accessSource) bool {
 	a := secret.Annotations
-	return secret.Labels[GuestAccessLabel] == "true" && a[accessPrefix+"source-namespace"] == s.hcu.Namespace && a[accessPrefix+"source-name"] == s.hcu.Name && a[accessPrefix+"hc-uid"] == string(s.hc.GetUID()) && a[accessPrefix+"hcu-uid"] == string(s.hcu.UID) && a[accessPrefix+"cluster-id"] == s.clusterID && a[accessPrefix+"profile"] == GuestObserverProfile && len(secret.OwnerReferences) == 0 && secret.DeletionTimestamp.IsZero()
+	return secret.Labels[GuestAccessLabel] == "true" && a[accessPrefix+"source-namespace"] == s.hcu.Namespace && a[accessPrefix+"source-name"] == s.hcu.Name && a[accessPrefix+"hc-uid"] == string(s.hc.GetUID()) && a[accessPrefix+"hcu-uid"] == string(s.hcu.UID) && a[accessPrefix+"cluster-id"] == s.clusterID && recognizedObserverProfile(a[accessPrefix+"profile"]) && len(secret.OwnerReferences) == 0 && secret.DeletionTimestamp.IsZero()
 }
 
 func (p *GuestAccessProvider) buildTarget(ctx context.Context, key client.ObjectKey, expected guest.Release) (guest.Target, []byte, error) {

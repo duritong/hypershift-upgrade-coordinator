@@ -184,6 +184,9 @@ type GuestAssessmentStatus struct {
 	ExpectedVersion string `json:"expectedVersion,omitempty"`
 	// +kubebuilder:validation:MaxItems=256
 	Operators []GuestOperatorSummary `json:"operators,omitempty"`
+	// Virtualization is separate from the bounded ALL-current-CO inventory.
+	// +optional
+	Virtualization *GuestOperatorSummary `json:"virtualization,omitempty"`
 	// +kubebuilder:validation:MaxItems=32
 	Blockers     []GuestBlocker `json:"blockers,omitempty"`
 	BlockerCount int32          `json:"blockerCount"`

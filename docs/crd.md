@@ -34,7 +34,7 @@ The `HostedClusterUpgrade` CR is designed to be user-centric, explicit, and easy
 | **`nodePoolStatuses`** | `array` | NodePool-level progress, node counts, schedules, and authoritative assessment/orchestration blockers. Unattributed HCCO logs are not pool blockers. |
 | **`drainDiagnostics`** | `object` | Best-effort cluster-level HCCO log hints: `available`, stable `reason` (`Collected`, `CollectionFailed`, `ScraperNotConfigured`), and at most ten recent `messages`. Unavailable collection is distinct from no observations. No NodePool/PDB ownership is inferred. |
 | **`guestAccess`** | `object` | Access-controller-owned maintenance and credential summary: `observedGeneration`, `reason`, `maintenanceReady`, `credentialAvailable`, `expiresAt`, identity/profile/endpoint metadata and `secretName`. No credentials. `observerUsability` remains `Unknown`; availability/maintenance are not proof of observer authentication or guest health. |
-| **`guestAssessment`** | `object` | Upgrade-controller-owned purpose-specific result: `state`, `reason`, `purpose`, `expectedVersion`, `observedGeneration`, `lastAttemptTime`, `lastSuccessfulObservation`, identity/revision fences, at most 256 operator name/version summaries and 32 blocker details, total `blockerCount` and `truncated`. |
+| **`guestAssessment`** | `object` | Upgrade-controller-owned purpose-specific result: `state`, `reason`, `purpose`, `expectedVersion`, `observedGeneration`, `lastAttemptTime`, `lastSuccessfulObservation`, identity/revision fences, at most 256 CO name/version summaries, a separate optional `virtualization` name/version summary, and 32 blocker details, total `blockerCount` and `truncated`. |
 | **`workerAdmission`** | `object` | Compatible stage-adoption record, bound to HCU/HC identities, generation, plan and release revisions, with `admittedAt`. Never replaces a fresh per-action guest gate. |
 
 `GuestAccessMaintenanceReady` and `GuestCredentialAvailable` conditions belong to
@@ -51,7 +51,7 @@ Guest observation is mandatory; no spec fields provide check skips, exclusions,
 force or bypass behavior. The guest endpoint mode, guest observer namespace and
 operator namespace are deployment configuration, not HCU-selected credential
 references or guest RBAC policy.
-See the [user guide](user-guide.md#mandatory-guest-access-unreleased).
+See the [user guide](user-guide.md#3-mandatory-guest-cluster-access).
 
 ---
 

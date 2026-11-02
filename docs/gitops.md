@@ -4,7 +4,7 @@ When deploying HyperShift clusters via GitOps, SREs define the desired state of 
 
 ## Mandatory Guest Verification Rollout
 
-The unreleased guest-observation implementation is enabled in the original
+The guest-observation implementation is enabled in the standard
 workflow for every managed HCU, including existing runs. Roll out its updated CRD,
 fleet get-only Service/source Secret reads, namespace-local delivery Secret
 Role/RoleBinding, Deployment namespace environment and operator image as one
@@ -26,7 +26,7 @@ The `ignoreDifferences` rules below delegate live HC/NodePool fields; they are
 are not available. Missing access or bad evidence withholds new actions without
 cancelling delegated work. Paused credential renewal can update an existing
 owned delivery Secret, but cannot bootstrap, repair RBAC or recreate missing
-resources. See [access/network prerequisites](user-guide.md#mandatory-guest-access-unreleased).
+resources. See [access/network prerequisites](user-guide.md#3-mandatory-guest-cluster-access).
 Validate actual HyperShift API connectivity, credential rotation and upgrade
 behavior before production rollout; automated simulations are not deployed
 upgrade validation.

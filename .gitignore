@@ -1,5 +1,7 @@
 # Local LLM Assistant Memory file
 GEMINI.md
+AGENTS.md
+.future-work.md
 
 # SDK binary files
 operator-sdk

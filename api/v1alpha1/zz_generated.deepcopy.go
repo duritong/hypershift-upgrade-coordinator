@@ -144,6 +144,11 @@ func (in *GuestAssessmentStatus) DeepCopyInto(out *GuestAssessmentStatus) {
 		*out = make([]GuestOperatorSummary, len(*in))
 		copy(*out, *in)
 	}
+	if in.Virtualization != nil {
+		in, out := &in.Virtualization, &out.Virtualization
+		*out = new(GuestOperatorSummary)
+		**out = **in
+	}
 	if in.Blockers != nil {
 		in, out := &in.Blockers, &out.Blockers
 		*out = make([]GuestBlocker, len(*in))

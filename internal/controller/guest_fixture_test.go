@@ -6,7 +6,6 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"time"
 
 	upgradev1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
@@ -113,12 +112,8 @@ func (p *legacyGuestAccess) BuildTargetAndReader(ctx context.Context, key client
 	}
 	v := fixtureCV(image, string(t.ClusterID))
 	ops := fixtureOperators(image)
-	var calls atomic.Int32
 	var s *httptest.Server
 	s = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 3 {
-			defer func() { go s.Close() }()
-		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Header.Get("Authorization") != "Bearer observer-token" {
 			w.WriteHeader(403)
@@ -126,8 +121,10 @@ func (p *legacyGuestAccess) BuildTargetAndReader(ctx context.Context, key client
 		}
 		if r.URL.Path == "/apis/config.openshift.io/v1/clusterversions/version" {
 			_ = json.NewEncoder(w).Encode(v)
-		} else {
+		} else if r.URL.Path == "/apis/config.openshift.io/v1/clusteroperators" {
 			_ = json.NewEncoder(w).Encode(configv1.ClusterOperatorList{TypeMeta: metav1.TypeMeta{Kind: "ClusterOperatorList", APIVersion: "config.openshift.io/v1"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: ops})
+		} else {
+			http.NotFound(w, r)
 		}
 	}))
 	// Each collector has exactly three requests; close the fixture when its

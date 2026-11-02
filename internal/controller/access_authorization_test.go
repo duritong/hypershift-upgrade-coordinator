@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -47,6 +48,12 @@ func testGuestAccessRealAuthorization(t *testing.T, observerNamespace string) {
 	var crds []*apiextensionsv1.CustomResourceDefinition
 	for _, kind := range []struct{ singular, plural, kind string }{{"clusterversion", "clusterversions", "ClusterVersion"}, {"clusteroperator", "clusteroperators", "ClusterOperator"}} {
 		crds = append(crds, &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: kind.plural + ".config.openshift.io"}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Group: "config.openshift.io", Scope: apiextensionsv1.ClusterScoped, Names: apiextensionsv1.CustomResourceDefinitionNames{Singular: kind.singular, Plural: kind.plural, Kind: kind.kind, ListKind: kind.kind + "List"}, Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1", Served: true, Storage: true, Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: &preserve}}}}}})
+	}
+	for _, kind := range []struct{ group, version, singular, plural, kind string }{
+		{"hco.kubevirt.io", "v1beta1", "hyperconverged", "hyperconvergeds", "HyperConverged"},
+		{"kubevirt.io", "v1", "kubevirt", "kubevirts", "KubeVirt"},
+	} {
+		crds = append(crds, &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: kind.plural + "." + kind.group}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Group: kind.group, Scope: apiextensionsv1.NamespaceScoped, Names: apiextensionsv1.CustomResourceDefinitionNames{Singular: kind.singular, Plural: kind.plural, Kind: kind.kind, ListKind: kind.kind + "List"}, Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: kind.version, Served: true, Storage: true, Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: &preserve}}}}}})
 	}
 	env := &envtest.Environment{BinaryAssetsDirectory: assets, CRDs: crds}
 	c, err := env.Start()
@@ -117,6 +124,50 @@ func testGuestAccessRealAuthorization(t *testing.T, observerNamespace string) {
 	operators, err := observer.Resource(coResource).List(ctx, metav1.ListOptions{})
 	if err != nil || len(operators.Items) != 1 {
 		t.Fatalf("observer CO list failed: %v", err)
+	}
+	for _, gvr := range []schema.GroupVersionResource{{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}, {Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}} {
+		resource := observer.Resource(gvr)
+		if _, err := resource.List(ctx, metav1.ListOptions{}); err != nil {
+			t.Fatalf("observer %s list denied: %v", gvr.Resource, err)
+		}
+		kind := "HyperConverged"
+		if gvr.Resource == "kubevirts" {
+			kind = "KubeVirt"
+		}
+		obj, err := admin.Resource(gvr).Namespace(observerNamespace).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": gvr.Group + "/" + gvr.Version, "kind": kind, "metadata": map[string]interface{}{"name": "example", "namespace": observerNamespace}}}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if list, err := resource.List(ctx, metav1.ListOptions{}); err != nil || len(list.Items) != 1 {
+			t.Fatalf("installed resource unreadable: %v", err)
+		}
+		for verb, request := range map[string]func() error{
+			"get": func() error {
+				_, err := resource.Namespace(observerNamespace).Get(ctx, "example", metav1.GetOptions{})
+				return err
+			},
+			"create": func() error {
+				_, err := resource.Namespace(observerNamespace).Create(ctx, obj.DeepCopy(), metav1.CreateOptions{})
+				return err
+			},
+			"update": func() error {
+				_, err := resource.Namespace(observerNamespace).Update(ctx, obj.DeepCopy(), metav1.UpdateOptions{})
+				return err
+			},
+			"delete": func() error {
+				return resource.Namespace(observerNamespace).Delete(ctx, "example", metav1.DeleteOptions{})
+			},
+			"patch": func() error {
+				_, err := resource.Namespace(observerNamespace).Patch(ctx, "example", types.MergePatchType, []byte(`{"spec":{}}`), metav1.PatchOptions{})
+				return err
+			},
+		} {
+			t.Run(gvr.Resource+"-deny-"+verb, func(t *testing.T) {
+				if err := request(); !apierrors.IsForbidden(err) {
+					t.Fatalf("expected Forbidden, got %v", err)
+				}
+			})
+		}
 	}
 	for name, request := range map[string]func() error{
 		"list-cv": func() error { _, err := observer.Resource(cvResource).List(ctx, metav1.ListOptions{}); return err },
