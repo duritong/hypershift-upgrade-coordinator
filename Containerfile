@@ -16,6 +16,7 @@ COPY api/ api/
 COPY internal/ internal/
 
 # Build offline using checked-in dependencies
+ENV GOTOOLCHAIN=auto
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -mod=vendor -a -o manager cmd/main.go
 
 # Use Red Hat hardened static image as minimal runtime
