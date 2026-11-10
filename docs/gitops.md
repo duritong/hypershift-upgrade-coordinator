@@ -146,7 +146,7 @@ spec:
 ## 4. Ownership Boundaries & Operational Guidelines
 
 - **Creation vs. Delegation:** Git owns initial resource creation and non-delegated configuration. After resource creation, HostedCluster `spec.release.image` and NodePool `spec.release.image` / `spec.pausedUntil` are managed by HUC.
-- **Triggering Future Upgrades:** To execute a subsequent upgrade, update `targetReleaseImage` (and optional `intermediateReleaseImage`) in the existing `HostedClusterUpgrade` manifest. You do not need to delete and recreate the upgrade CR.
+- **Bootstrapping & Future Upgrades:** A `HostedClusterUpgrade` manifest can be committed alongside initial cluster resources targeting the cluster's initial release image (same version and exact digest). HUC verifies and adopts the existing control plane without rewriting it. NodePools already on the target do not roll out; any lagging NodePool is upgraded according to its group schedule and the configured concurrency limit, so confirm worker alignment or schedule the groups before onboarding. To execute a subsequent upgrade, update `targetReleaseImage` (and optional `intermediateReleaseImage`) in the existing manifest; the CR need not be recreated.
 - **NodePool Membership:** Keep NodePool membership and group labels stable during active rollouts. New NodePools should be provisioned before an upgrade starts or after it finishes.
 - **Independent User Pauses:** If an SRE sets `spec.pausedUntil: "true"` on a NodePool manually, HUC preserves this pause and will not unpause the pool upon completing other rollouts.
 

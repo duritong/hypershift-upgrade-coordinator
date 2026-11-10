@@ -62,6 +62,9 @@ func TestWebhookUpgradePath(t *testing.T) {
 	image := func(version string) string {
 		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("a", 64)
 	}
+	otherImage := func(version string) string {
+		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("b", 64)
+	}
 	for _, tt := range []struct {
 		name, current, target, intermediate string
 		wantErr                             bool
@@ -69,7 +72,9 @@ func TestWebhookUpgradePath(t *testing.T) {
 		{"direct", "4.20.0", image("4.21.0"), "", false},
 		{"eus", "4.20.0", image("4.22.0"), image("4.21.0"), false},
 		{"skip intermediate", "4.21.5", image("4.22.0"), image("4.21.0"), false},
-		{"equal target rejected", "4.21.0", image("4.21.0"), "", true},
+		{"equal target same digest allowed", "4.21.0", image("4.21.0"), "", false},
+		{"equal target different digest rejected", "4.21.0", otherImage("4.21.0"), "", true},
+		{"equal target with intermediate rejected", "4.21.0", image("4.21.0"), image("4.20.0"), true},
 		{"downgrade rejected", "4.21.0", image("4.20.0"), "", true},
 		{"bare target rejected", "4.20.0", "4.21.0", "", true},
 		{"bare intermediate rejected", "4.20.0", image("4.22.0"), "4.21.0", true},
@@ -94,7 +99,7 @@ func TestWebhookUpgradePath(t *testing.T) {
 				t.Fatalf("ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			// Non-image updates must remain possible after reaching target.
-			if tt.name == "equal target rejected" {
+			if tt.name == "equal target different digest rejected" {
 				old = hcu.DeepCopy()
 				paused := "true"
 				hcu.Spec.PausedUntil = &paused
@@ -170,15 +175,41 @@ func TestWebhookLocalValidation(t *testing.T) {
 }
 
 func TestAdmissionDigestOnlyCurrentRelease(t *testing.T) {
-	hc := createMockHostedCluster("cluster", "clusters", "quay.io/ocp@sha256:"+strings.Repeat("a", 64))
+	currentDigest := strings.Repeat("a", 64)
+	hc := createMockHostedCluster("cluster", "clusters", "quay.io/ocp@sha256:"+currentDigest)
 	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{map[string]interface{}{
-		"state": "Completed", "version": "4.20.0", "image": "quay.io/ocp@sha256:" + strings.Repeat("a", 64),
+		"state": "Completed", "version": "4.20.0", "image": "quay.io/ocp@sha256:" + currentDigest,
+	}}, "status", "version", "history")
+	v := &HostedClusterUpgradeCustomValidator{Client: upgradePathTestClient{hc: hc}}
+	for _, tt := range []struct {
+		name, target string
+		wantErr      bool
+	}{
+		{"forward upgrade", "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("b", 64), false},
+		{"equal identical payload", "quay.io/ocp:4.20.0-x86_64@sha256:" + currentDigest, false},
+		{"equal different payload", "quay.io/ocp:4.20.0-x86_64@sha256:" + strings.Repeat("b", 64), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hcu := &HostedClusterUpgrade{ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: "clusters"},
+				Spec: HostedClusterUpgradeSpec{TargetReleaseImage: tt.target}}
+			_, err := v.ValidateCreate(context.Background(), hcu)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateCreate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAdmissionUsesReportedVersionForProgression(t *testing.T) {
+	hc := createMockHostedCluster("cluster", "clusters", "quay.io/ocp:4.21.0-x86_64@sha256:"+strings.Repeat("a", 64))
+	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{map[string]interface{}{
+		"state": "Completed", "version": "4.20.0", "image": "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("a", 64),
 	}}, "status", "version", "history")
 	v := &HostedClusterUpgradeCustomValidator{Client: upgradePathTestClient{hc: hc}}
 	hcu := &HostedClusterUpgrade{ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: "clusters"},
-		Spec: HostedClusterUpgradeSpec{TargetReleaseImage: "quay.io/ocp:4.21.0-x86_64@sha256:" + strings.Repeat("b", 64)}}
-	if _, err := v.ValidateCreate(context.Background(), hcu); err != nil {
-		t.Fatalf("digest-only current image with explicit status version rejected: %v", err)
+		Spec: HostedClusterUpgradeSpec{TargetReleaseImage: "quay.io/ocp:4.22.0-x86_64@sha256:" + strings.Repeat("b", 64)}}
+	if _, err := v.ValidateCreate(context.Background(), hcu); err == nil || !strings.Contains(err.Error(), "multi-minor") {
+		t.Fatalf("reported current version did not gate progression: %v", err)
 	}
 }
 

@@ -400,7 +400,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 	if installing, _ := r.checkClusterInstallingAndHealth(uHC); !installing {
 		currentRelease, currentVersion := GetHostedClusterCurrentRelease(uHC)
-		if currentVersion != "" {
+		if currentRelease != "" {
+			if _, err := upgradev1alpha1.ExtractVersion(currentRelease); err != nil && currentVersion != "" {
+				currentRelease = currentVersion
+			}
+		} else {
 			currentRelease = currentVersion
 		}
 		if err := upgradev1alpha1.ValidateUpgradePath(currentRelease, hcu.Spec.TargetReleaseImage, hcu.Spec.IntermediateReleaseImage, true); err != nil {
@@ -1797,52 +1801,7 @@ var statusChangePredicate = predicate.Funcs{
 
 // GetHostedClusterCurrentRelease extracts the current release image and semantic version from HostedCluster status or spec.
 func GetHostedClusterCurrentRelease(uHC *unstructured.Unstructured) (string, string) {
-	if uHC == nil {
-		return "", ""
-	}
-	history, found, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
-	if found && len(history) > 0 {
-		for _, item := range history {
-			hMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			state, _ := hMap["state"].(string)
-			if state == "Completed" {
-				img, _ := hMap["image"].(string)
-				ver, _ := hMap["version"].(string)
-				if img != "" || ver != "" {
-					if ver == "" {
-						ver, _ = upgradev1alpha1.ExtractVersion(img)
-					}
-					return img, ver
-				}
-			}
-		}
-		if hMap, ok := history[0].(map[string]interface{}); ok {
-			img, _ := hMap["image"].(string)
-			ver, _ := hMap["version"].(string)
-			if img != "" || ver != "" {
-				if ver == "" {
-					ver, _ = upgradev1alpha1.ExtractVersion(img)
-				}
-				return img, ver
-			}
-		}
-	}
-
-	desiredImg, foundImg, _ := unstructured.NestedString(uHC.Object, "status", "version", "desired", "image")
-	desiredVer, _, _ := unstructured.NestedString(uHC.Object, "status", "version", "desired", "version")
-	if foundImg && desiredImg != "" {
-		if desiredVer == "" {
-			desiredVer, _ = upgradev1alpha1.ExtractVersion(desiredImg)
-		}
-		return desiredImg, desiredVer
-	}
-
-	specImg, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
-	specVer, _ := upgradev1alpha1.ExtractVersion(specImg)
-	return specImg, specVer
+	return upgradev1alpha1.GetHostedClusterCurrentRelease(uHC)
 }
 
 // GetNodePoolNodeCounts returns observed population, target-version nodes and

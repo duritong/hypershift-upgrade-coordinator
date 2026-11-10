@@ -288,6 +288,40 @@ func TestControllerRecoveryAtTargetVerifiesComponents(t *testing.T) {
 	}
 }
 
+func TestBootstrapSameVersionSameDigestAllowed(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseIdle)
+	hcu.Spec.TargetReleaseImage = regressionImage("4.20.0")
+	hc := regressionHC("4.20.0")
+	np := regressionNP("workers", "")
+	md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
+	c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+	addReadyCP(c, hc)
+
+	var got *upgradev1alpha1.HostedClusterUpgrade
+	for range 5 {
+		got = reconcileRegression(t, c)
+		if got.Status.Phase == upgradev1alpha1.PhaseBlocked {
+			t.Fatalf("bootstrap same-version same-digest was unexpectedly blocked: %s", got.Status.Message)
+		}
+		if got.Status.Phase == upgradev1alpha1.PhaseCompleted {
+			break
+		}
+	}
+	if got.Status.Phase != upgradev1alpha1.PhaseCompleted || c.writes != 0 {
+		t.Fatalf("aligned bootstrap did not complete without downstream writes: phase=%s writes=%d", got.Status.Phase, c.writes)
+	}
+}
+
+func TestBootstrapSameVersionDifferentDigestBlocked(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+	hcu.Spec.TargetReleaseImage = fmt.Sprintf("quay.io/ocp:4.20.0-x86_64@sha256:%x", sha256.Sum256([]byte("different-digest")))
+	c := &regressionClient{objects: []client.Object{hcu, regressionHC("4.20.0"), regressionNP("workers", "")}}
+	got := reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseBlocked {
+		t.Fatalf("same-version differing digest was not blocked: phase=%s", got.Status.Phase)
+	}
+}
+
 func TestNodePoolReadinessEvidence(t *testing.T) {
 	for _, tt := range []struct {
 		name                              string

@@ -84,6 +84,9 @@ func TestValidateUpgradePath(t *testing.T) {
 	image := func(version string) string {
 		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("a", 64)
 	}
+	otherImage := func(version string) string {
+		return "quay.io/ocp:" + version + "-x86_64@sha256:" + strings.Repeat("b", 64)
+	}
 	for _, tt := range []struct {
 		name, current, target, intermediate string
 		allowEqual, wantErr                 bool
@@ -107,9 +110,15 @@ func TestValidateUpgradePath(t *testing.T) {
 		{"intermediate reached", "4.21.0", image("4.22.0"), image("4.21.0"), false, false},
 		{"intermediate passed", "4.21.5", image("4.22.0"), image("4.21.0"), false, false},
 		{"older intermediate skipped", "4.21.0", image("4.22.0"), image("4.19.0"), false, false},
-		{"admission equality", "4.22.0", image("4.22.0"), "", false, true},
-		{"recovery equality", "4.22.0", image("4.22.0"), "", true, false},
+		{"admission equality bare version", "4.22.0", image("4.22.0"), "", false, true},
+		{"admission equality same image", image("4.22.0"), image("4.22.0"), "", false, false},
+		{"admission equality different digest", image("4.22.0"), otherImage("4.22.0"), "", false, true},
+		{"admission equality with intermediate", image("4.22.0"), image("4.22.0"), image("4.21.0"), false, true},
+		{"recovery equality bare version", "4.22.0", image("4.22.0"), "", true, false},
+		{"recovery equality same image", image("4.22.0"), image("4.22.0"), "", true, false},
+		{"recovery equality different digest", image("4.22.0"), otherImage("4.22.0"), "", true, false},
 		{"recovery intermediate skipped", "4.22.0", image("4.22.0"), image("4.21.0"), true, false},
+		{"recovery equality skipped cross major", image("4.22.0"), image("4.22.0"), image("3.21.0"), true, true},
 		{"recovery intermediate equals target", "4.22.0", image("4.22.0"), image("4.22.0"), true, true},
 		{"recovery intermediate above target", "4.22.0", image("4.22.0"), image("4.23.0"), true, true},
 		{"recovery downgrade", "4.22.1", image("4.22.0"), "", true, true},

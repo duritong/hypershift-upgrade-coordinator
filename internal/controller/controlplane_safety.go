@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -83,9 +82,7 @@ func (r *HostedClusterUpgradeReconciler) validateControlPlaneWorkerSkew(ctx cont
 // Payload identity is independent of registry mirrors and human-readable tags.
 // Never fall back to version equality when comparing immutable payloads.
 func samePayload(a, b string) bool {
-	_, ad, aok := strings.Cut(a, "@")
-	_, bd, bok := strings.Cut(b, "@")
-	return aok && bok && ad != "" && ad == bd
+	return upgradev1alpha1.SamePayload(a, b)
 }
 
 func latestRelease(hc *unstructured.Unstructured, field string) map[string]interface{} {

@@ -159,48 +159,17 @@ func (v *HostedClusterUpgradeCustomValidator) validateUpgradeSpec(ctx context.Co
 	if err := RejectControlPlaneReleaseOverride(uHC); err != nil {
 		return err
 	}
-	var currentRelease string
-	history, found, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
-	if found && len(history) > 0 {
-		for _, item := range history {
-			hMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			state, _ := hMap["state"].(string)
-			if state == "Completed" {
-				currentRelease, _ = hMap["version"].(string)
-				if currentRelease == "" {
-					currentRelease, _ = hMap["image"].(string)
-				}
-				break
-			}
-		}
-		if currentRelease == "" {
-			if hMap, ok := history[0].(map[string]interface{}); ok {
-				currentRelease, _ = hMap["version"].(string)
-				if currentRelease == "" {
-					currentRelease, _ = hMap["image"].(string)
-				}
-			}
-		}
+	currentImage, currentVersion := GetHostedClusterCurrentRelease(uHC)
+	if currentVersion == "" {
+		currentVersion = currentImage
 	}
-	if currentRelease == "" {
-		currentRelease, _, _ = unstructured.NestedString(uHC.Object, "status", "version", "desired", "version")
-	}
-	if currentRelease == "" {
-		currentRelease, _, _ = unstructured.NestedString(uHC.Object, "status", "version", "desired", "image")
-	}
-	if currentRelease == "" {
-		currentRelease, _, _ = unstructured.NestedString(uHC.Object, "spec", "release", "image")
-	}
-
-	if currentRelease == "" {
+	if currentVersion == "" {
 		return fmt.Errorf("unable to determine current version from target HostedCluster '%s' spec or status", r.Name)
 	}
 
-	// 3. Share path validation with controller preflight, but keep admission strict.
-	if err := ValidateUpgradePath(currentRelease, r.Spec.TargetReleaseImage, r.Spec.IntermediateReleaseImage, false); err != nil {
+	// 3. Use status version for progression while retaining the image digest
+	// as the immutable identity required for same-version baseline adoption.
+	if err := validateUpgradePath(currentVersion, currentImage, r.Spec.TargetReleaseImage, r.Spec.IntermediateReleaseImage, false); err != nil {
 		return err
 	}
 

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"golang.org/x/mod/semver"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // ImagePattern matches: registry.domain.com/path:version-arch@sha256:digest
@@ -53,13 +54,76 @@ func ParseReleaseImageMetadata(pullspec string) (version, arch string, err error
 	return version, arch, nil
 }
 
+// SamePayload compares two image pullspecs by immutable digest reference.
+// Mirror repositories and tags may differ; payload identity is determined by digest.
+func SamePayload(a, b string) bool {
+	_, ad, aok := strings.Cut(a, "@")
+	_, bd, bok := strings.Cut(b, "@")
+	return aok && bok && ad != "" && ad == bd
+}
+
+// GetHostedClusterCurrentRelease extracts the current release image and semantic version from HostedCluster status or spec.
+func GetHostedClusterCurrentRelease(uHC *unstructured.Unstructured) (string, string) {
+	if uHC == nil {
+		return "", ""
+	}
+	history, found, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
+	if found && len(history) > 0 {
+		for _, item := range history {
+			hMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			state, _ := hMap["state"].(string)
+			if state == "Completed" {
+				img, _ := hMap["image"].(string)
+				ver, _ := hMap["version"].(string)
+				if img != "" || ver != "" {
+					if ver == "" {
+						ver, _ = ExtractVersion(img)
+					}
+					return img, ver
+				}
+			}
+		}
+		if hMap, ok := history[0].(map[string]interface{}); ok {
+			img, _ := hMap["image"].(string)
+			ver, _ := hMap["version"].(string)
+			if img != "" || ver != "" {
+				if ver == "" {
+					ver, _ = ExtractVersion(img)
+				}
+				return img, ver
+			}
+		}
+	}
+
+	desiredImg, foundImg, _ := unstructured.NestedString(uHC.Object, "status", "version", "desired", "image")
+	desiredVer, _, _ := unstructured.NestedString(uHC.Object, "status", "version", "desired", "version")
+	if foundImg && desiredImg != "" {
+		if desiredVer == "" {
+			desiredVer, _ = ExtractVersion(desiredImg)
+		}
+		return desiredImg, desiredVer
+	}
+
+	specImg, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+	specVer, _ := ExtractVersion(specImg)
+	return specImg, specVer
+}
+
 // ValidateUpgradePath validates release images and same-major, at-most-one-minor
 // forward hops. currentRelease may be a version or pullspec; intermediatePullspec
-// may be empty. Admission must set allowTargetEqualCurrent to false. Controllers
-// may set it to true when recovering an upgrade whose control plane reached target.
+// may be empty. allowTargetEqualCurrent permits target equality when recovering an
+// upgrade whose control plane reached target. Admission (allowTargetEqualCurrent=false)
+// allows target equality only when the target pullspec has the identical immutable payload digest.
 // An intermediate at or behind current is skipped, but must still precede target.
 func ValidateUpgradePath(currentRelease, targetPullspec, intermediatePullspec string, allowTargetEqualCurrent bool) error {
-	currentVersion, err := ExtractVersion(currentRelease)
+	return validateUpgradePath(currentRelease, currentRelease, targetPullspec, intermediatePullspec, allowTargetEqualCurrent)
+}
+
+func validateUpgradePath(currentVersion, currentImage, targetPullspec, intermediatePullspec string, allowTargetEqualCurrent bool) error {
+	currentVersion, err := ExtractVersion(currentVersion)
 	if err != nil {
 		return fmt.Errorf("current cluster release image format is invalid: %w", err)
 	}
@@ -76,8 +140,17 @@ func ValidateUpgradePath(currentRelease, targetPullspec, intermediatePullspec st
 	}
 
 	comparison := semver.Compare("v"+currentVersion, "v"+targetVersion)
-	if comparison > 0 || (comparison == 0 && !allowTargetEqualCurrent) {
-		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s' (equality allowed: %t)", targetVersion, currentVersion, allowTargetEqualCurrent)
+	if comparison > 0 {
+		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
+	}
+	if comparison == 0 && !allowTargetEqualCurrent {
+		if intermediatePullspec != "" {
+			return fmt.Errorf("invalid version progression: intermediate release image cannot be specified when target version '%s' equals current version", targetVersion)
+		}
+		if !SamePayload(currentImage, targetPullspec) {
+			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s' (equality allowed only with identical payload digest)", targetVersion, currentVersion)
+		}
+		return nil
 	}
 	currMajor, currMinor, err := GetMajorMinor(currentVersion)
 	if err != nil {

@@ -7,9 +7,9 @@ The HyperShift Upgrade Coordinator (HUC) enforces strict safety gates before and
 ## 1. Upgrade Plan & Version Progression
 
 - **Supported Path Responsibility:** HUC validates that planned upgrade hops follow valid semantic versioning rules (same major version, at most one minor hop per step). SRE teams must ensure that the planned path is supported by the OpenShift update graph and HyperShift release matrix. HUC does not query the OpenShift update graph service dynamically.
-- **Monotonic Progression:** Upgrades must strictly advance forward:
+- **Monotonic Progression & Bootstrap Equality:** Upgrades must strictly advance forward:
   $$\text{Current Version} < \text{Intermediate Version} < \text{Target Version}$$
-  Downgrades and lateral version changes with differing digests are rejected by admission webhooks and preflight controllers.
+  Downgrades and lateral version changes with differing digests are rejected by admission webhooks and preflight controllers. A `HostedClusterUpgrade` matching the current control plane version is accepted by admission if and only if it specifies the exact identical immutable payload digest (`samePayload`) without intermediate hops, allowing Day-1 GitOps bootstrapping and baseline adoption. This adopts the control plane only; NodePools behind the target remain subject to the configured rollout policy.
 - **Digest-Pinned Payloads:** All release images must specify immutable digest references (`@sha256:<64-hex>`). Tags alone are not treated as authoritative.
 
 ---
