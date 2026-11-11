@@ -1947,9 +1947,13 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 	hcp := &unstructured.Unstructured{}
 	hcp.SetGroupVersionKind(gvkHCP)
 	hcpErr := r.Get(ctx, client.ObjectKey{Namespace: cpNamespace, Name: hcu.Name}, hcp)
+	uHC := &unstructured.Unstructured{}
+	uHC.SetGroupVersionKind(gvkHC)
+	_ = r.Get(ctx, client.ObjectKey{Namespace: hcu.Namespace, Name: hcu.Name}, uHC)
+	platform, _, _ := unstructured.NestedString(uHC.Object, "spec", "platform", "type")
+
 	var upgradedCount int32
 	blockers := []string{}
-
 	for i, item := range uList.Items {
 		name := item.GetName()
 		version, _, _ := unstructured.NestedString(item.Object, "status", "version")
@@ -2002,6 +2006,15 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 
 		compMsg := strings.Join(failureMsgs, "; ")
 
+		isCNOBug := isUpstreamCNOBug(name, compMsg, platform, available)
+		if isCNOBug {
+			rolloutComplete = true
+			if version == "" {
+				version = expectedVer
+			}
+			compMsg = "Tolerating upstream HyperShift CNO bug (commit 36afffc64f): cloud-network-config-controller is not deployed on non-cloud platforms; will be removed in future release"
+		}
+
 		var versionMatches bool
 		if expectedVer == "" {
 			versionMatches = true
@@ -2010,8 +2023,11 @@ func (r *HostedClusterUpgradeReconciler) aggregateControlPlaneStatus(ctx context
 			versionMatches = (compVer == expectedVer)
 		}
 
-		observed, _, _ := unstructured.NestedInt64(item.Object, "status", "observedGeneration")
-		fresh := hcpErr == nil && hcp.GetGeneration() > 0 && observed >= hcp.GetGeneration()
+		// In HyperShift, CPO v2 components only populate status.version and conditions;
+		// status.observedGeneration is only populated by legacy management components.
+		// When reported, it must not be behind HostedControlPlane.generation.
+		observed, hasObserved, _ := unstructured.NestedInt64(item.Object, "status", "observedGeneration")
+		fresh := isCNOBug || !hasObserved || (hcpErr == nil && hcp.GetGeneration() > 0 && observed >= hcp.GetGeneration())
 		if available && rolloutComplete && versionMatches && fresh {
 			upgradedCount++
 		} else {

@@ -289,3 +289,73 @@ func TestControlPlaneActuationHonorsChangedSchedule(t *testing.T) {
 		t.Fatal("future schedule prevented adoption of an already requested rollout")
 	}
 }
+
+func TestUpstreamCNOBugTolerationOnAgentPlatform(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+	hcu.Spec.TargetReleaseImage = regressionImage("4.21.0")
+	hc := regressionHC("4.21.0")
+	_ = unstructured.SetNestedField(hc.Object, "Agent", "spec", "platform", "type")
+
+	cpHistory, _, _ := unstructured.NestedSlice(hc.Object, "status", "controlPlaneVersion", "history")
+	if len(cpHistory) > 0 {
+		cpHistory[0].(map[string]interface{})["state"] = "Partial"
+		_ = unstructured.SetNestedSlice(hc.Object, cpHistory, "status", "controlPlaneVersion", "history")
+	}
+
+	np := regressionNP("workers", "")
+	md := readyWorkerFixture(np, regressionImage("4.21.0"))
+	c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+	addReadyCP(c, hc)
+
+	cno := &unstructured.Unstructured{}
+	cno.SetGroupVersionKind(gvkCPC)
+	cno.SetName("cluster-network-operator")
+	cno.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+	_ = unstructured.SetNestedField(cno.Object, int64(1), "status", "observedGeneration")
+	_ = unstructured.SetNestedSlice(cno.Object, []interface{}{
+		map[string]interface{}{"type": "Available", "status": "True", "message": "Deployment cluster-network-operator is available"},
+		map[string]interface{}{"type": "RolloutComplete", "status": "False", "reason": "WaitingForOperands", "message": `failed to get deployment cloud-network-config-controller: Deployment.apps "cloud-network-config-controller" not found`},
+	}, "status", "conditions")
+	c.objects = append(c.objects, cno)
+
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, hcu, nil)}
+	got := reconcileReleaseTest(t, r, c, hcu)
+	if got.Status.Phase == upgradev1alpha1.PhaseBlocked {
+		t.Fatalf("CNO bug should be tolerated on Agent platform, but got blocked: %s", got.Status.Message)
+	}
+}
+
+func TestUpstreamCNOBugNotToleratedOnAWSPlatform(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+	hcu.Spec.TargetReleaseImage = regressionImage("4.21.0")
+	hc := regressionHC("4.21.0")
+	_ = unstructured.SetNestedField(hc.Object, "AWS", "spec", "platform", "type")
+
+	cpHistory, _, _ := unstructured.NestedSlice(hc.Object, "status", "controlPlaneVersion", "history")
+	if len(cpHistory) > 0 {
+		cpHistory[0].(map[string]interface{})["state"] = "Partial"
+		_ = unstructured.SetNestedSlice(hc.Object, cpHistory, "status", "controlPlaneVersion", "history")
+	}
+
+	np := regressionNP("workers", "")
+	md := readyWorkerFixture(np, regressionImage("4.21.0"))
+	c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+	addReadyCP(c, hc)
+
+	cno := &unstructured.Unstructured{}
+	cno.SetGroupVersionKind(gvkCPC)
+	cno.SetName("cluster-network-operator")
+	cno.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+	_ = unstructured.SetNestedField(cno.Object, int64(1), "status", "observedGeneration")
+	_ = unstructured.SetNestedSlice(cno.Object, []interface{}{
+		map[string]interface{}{"type": "Available", "status": "True"},
+		map[string]interface{}{"type": "RolloutComplete", "status": "False", "message": `cloud-network-config-controller`},
+	}, "status", "conditions")
+	c.objects = append(c.objects, cno)
+
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, hcu, nil)}
+	got := reconcileReleaseTest(t, r, c, hcu)
+	if got.Status.Phase != upgradev1alpha1.PhaseBlocked && got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+		t.Fatalf("CNO bug must NOT be tolerated on AWS cloud platform; got phase: %s", got.Status.Phase)
+	}
+}

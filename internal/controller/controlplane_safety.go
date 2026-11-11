@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -77,6 +78,58 @@ func (r *HostedClusterUpgradeReconciler) validateControlPlaneWorkerSkew(ctx cont
 		}
 	}
 	return nil
+}
+
+// platformHasCloudNetworkConfigController returns true for platforms where CNO deploys
+// cloud-network-config-controller (AWS, Azure, GCP, OpenStack).
+// Non-cloud platforms (Agent, KubeVirt, None, IBMCloud, PowerVS) never deploy it.
+func platformHasCloudNetworkConfigController(platform string) bool {
+	switch platform {
+	case "AWS", "Azure", "GCP", "OpenStack":
+		return true
+	default:
+		return false
+	}
+}
+
+// isUpstreamCNOBug checks for the known upstream HyperShift bug (fixed in commit 36afffc64f)
+// where CPO expects cloud-network-config-controller on non-cloud platforms.
+// TODO: Remove this workaround once managed clusters are upgraded to HyperShift incorporating commit 36afffc64f.
+func isUpstreamCNOBug(componentName, compMsg, platform string, available bool) bool {
+	if componentName != "cluster-network-operator" || !available {
+		return false
+	}
+	if platformHasCloudNetworkConfigController(platform) {
+		return false
+	}
+	return strings.Contains(compMsg, "cloud-network-config-controller")
+}
+
+// isControlPlaneVersionCNOBugTolerated tolerates controlPlaneVersion staying in Partial
+// when caused by the upstream HyperShift CNO bug on non-cloud platforms.
+// TODO: Remove this workaround once managed clusters run HyperShift with commit 36afffc64f.
+func isControlPlaneVersionCNOBugTolerated(hc *unstructured.Unstructured, version, image string) bool {
+	platform, _, _ := unstructured.NestedString(hc.Object, "spec", "platform", "type")
+	if platformHasCloudNetworkConfigController(platform) {
+		return false
+	}
+	cpLatest := latestRelease(hc, "controlPlaneVersion")
+	if cpLatest["state"] != "Partial" {
+		return false
+	}
+	// Verify guest ClusterVersion status is fully completed at the expected version and payload.
+	latest := latestRelease(hc, "version")
+	completed, _ := latest["image"].(string)
+	if latest["state"] != "Completed" || latest["version"] != version || !samePayload(completed, image) {
+		return false
+	}
+	// Verify controlPlaneVersion desired image matches expected image
+	cpDesired, _, _ := unstructured.NestedString(hc.Object, "status", "controlPlaneVersion", "desired", "image")
+	if cpDesired != "" && !samePayload(cpDesired, image) {
+		return false
+	}
+	cpCompleted, _ := cpLatest["image"].(string)
+	return cpLatest["version"] == version && samePayload(cpCompleted, image)
 }
 
 // Payload identity is independent of registry mirrors and human-readable tags.
@@ -184,6 +237,12 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Con
 		latest := latestRelease(hc, field)
 		completed, _ := latest["image"].(string)
 		if latest["state"] != "Completed" || latest["version"] != version || !samePayload(completed, image) {
+			if field == "controlPlaneVersion" && latest["state"] == "Partial" && isControlPlaneVersionCNOBugTolerated(hc, version, image) {
+				// Upstream HyperShift bug (fixed in 36afffc64f): on non-cloud platforms,
+				// controlPlaneVersion remains Partial because CNO expects cloud-network-config-controller.
+				// Guest version is Completed at expected payload and version.
+				continue
+			}
 			return proof, fmt.Errorf("waiting for latest %s Completed history with exact expected payload and version", field)
 		}
 		if requested, _, _ := unstructured.NestedString(hc.Object, "status", field, "desired", "image"); requested != "" && !samePayload(requested, image) {
