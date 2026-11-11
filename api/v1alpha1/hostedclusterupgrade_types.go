@@ -47,17 +47,21 @@ type HostedClusterUpgradeSpec struct {
 	// ControlPlane defines the scheduling details for upgrading the Hosted Control Plane (HCP).
 	// Since CP upgrades are typically non-disruptive to user workloads, SREs can schedule
 	// this stage immediately or during regular business hours.
-	// +required
-	ControlPlane ControlPlaneUpgradeSpec `json:"controlPlane"`
+	// If omitted or empty, the control plane upgrade starts immediately when prerequisites pass.
+	// +optional
+	// +nullable
+	ControlPlane ControlPlaneUpgradeSpec `json:"controlPlane,omitempty"`
 
 	// NodePoolGroups lists the sequential rollout groups and their maintenance window start schedules.
 	// First groups in this list upgrade first. Un-labeled NodePools belong to the "default" group.
 	// +optional
+	// +nullable
 	// +listType=atomic
 	NodePoolGroups []NodePoolGroupSpec `json:"nodePoolGroups,omitempty"`
 
 	// RolloutPolicy defines global constraints on the upgrade execution.
 	// +optional
+	// +nullable
 	RolloutPolicy *RolloutPolicySpec `json:"rolloutPolicy,omitempty"`
 }
 

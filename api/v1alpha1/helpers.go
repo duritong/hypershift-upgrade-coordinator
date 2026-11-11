@@ -144,11 +144,24 @@ func validateUpgradePath(currentVersion, currentImage, targetPullspec, intermedi
 		return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s'", targetVersion, currentVersion)
 	}
 	if comparison == 0 && !allowTargetEqualCurrent {
-		if intermediatePullspec != "" {
-			return fmt.Errorf("invalid version progression: intermediate release image cannot be specified when target version '%s' equals current version", targetVersion)
-		}
 		if !SamePayload(currentImage, targetPullspec) {
 			return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than current version '%s' (equality allowed only with identical payload digest)", targetVersion, currentVersion)
+		}
+		if intermediateVersion != "" {
+			intMajor, _, err := GetMajorMinor(intermediateVersion)
+			if err != nil {
+				return err
+			}
+			currMajor, _, err := GetMajorMinor(currentVersion)
+			if err != nil {
+				return err
+			}
+			if currMajor != intMajor {
+				return fmt.Errorf("invalid major version jump: cannot upgrade across different major versions (%d -> %d)", currMajor, intMajor)
+			}
+			if !IsUpstreamGreater(intermediateVersion, targetVersion) {
+				return fmt.Errorf("invalid version progression: target version '%s' is not strictly greater than intermediate version '%s'", targetVersion, intermediateVersion)
+			}
 		}
 		return nil
 	}
