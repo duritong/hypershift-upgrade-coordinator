@@ -43,12 +43,11 @@ HUC authenticates to container registries using the pull secret configured on th
 
 ## 4. Disconnected & Air-Gapped Environments
 
-In disconnected environments:
+In disconnected environments without direct access to external registries like `quay.io`:
 
-- **Mirrored Pullspecs:** Configure the `HostedClusterUpgrade` to point directly to the reachable mirror registry containing the pinned payload digest.
-- **Mirror Credentials:** Ensure the HostedCluster pull secret includes valid credentials for the mirror registry.
-- **Custom Certificates:** If the mirror registry uses a private Certificate Authority (CA), ensure the coordinator deployment trusts that CA in its container trust store.
-
+- **Automatic Mirror Resolution:** HUC automatically extracts registry mirror mappings from `HostedCluster.spec.imageContentSources` as well as management-cluster `ImageDigestMirrorSet` (IDMS) and `ImageContentSourcePolicy` (ICSP) custom resources. If a candidate image matches a configured mirror source, HUC attempts resolution through each mirror candidate in order before falling back to the original pullspec.
+- **Mirror Credentials:** Ensure the secret referenced by `HostedCluster.spec.pullSecret` contains valid credentials for the mirror registries (matching either the registry hostname or repository prefix, with or without protocol scheme).
+- **Custom Certificates:** If the mirror registry uses an enterprise or private Certificate Authority (CA), configure `HostedCluster.spec.additionalTrustBundle` pointing to a ConfigMap containing the `ca-bundle.crt` key. HUC reads the trust bundle and injects it into the registry TLS transport.
 ---
 
 ## 5. Resource Limits & Safety Bounds

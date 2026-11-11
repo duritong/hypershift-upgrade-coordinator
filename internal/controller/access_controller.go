@@ -3,14 +3,10 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
-	"reflect"
-	"time"
-
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	"github.com/duritong/hypershift-upgrade-coordinator/internal/guest"
 	configv1 "github.com/openshift/api/config/v1"
+	"io"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -26,6 +22,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
+	"net/http"
+	"reflect"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -33,8 +31,11 @@ import (
 	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"strings"
+	"time"
 )
 
 // GuestAccessReconciler owns only credential lifecycle and its status section.
@@ -70,7 +71,8 @@ func (r *GuestAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	hc := &unstructured.Unstructured{}
 	hc.SetGroupVersionKind(gvkHC)
 	mapSource := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		if r.HostedClusterNamespace != "" && obj.GetNamespace() != r.HostedClusterNamespace {
+		targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+		if targetNamespace != "" && obj.GetNamespace() != targetNamespace {
 			return nil
 		}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), &upgradev1alpha1.HostedClusterUpgrade{}); err != nil {
@@ -97,7 +99,10 @@ func (r *GuestAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *GuestAccessReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if r.HostedClusterNamespace != "" && req.Namespace != r.HostedClusterNamespace {
+	targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" && req.Namespace != targetNamespace {
+		log.FromContext(ctx).Info("Skipping guest access: resource namespace does not match configured target namespace",
+			"resourceNamespace", req.Namespace, "configuredTargetNamespace", r.HostedClusterNamespace)
 		return ctrl.Result{}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)

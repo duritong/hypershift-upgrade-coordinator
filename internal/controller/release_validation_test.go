@@ -3,15 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
-	"testing"
-
 	upgradev1alpha1 "github.com/duritong/hypershift-upgrade-coordinator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"reflect"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"strings"
+	"testing"
 )
 
 // Only test fixtures may derive metadata from a tag instead of the payload.
@@ -229,5 +229,101 @@ func TestReleasePayloadMatchesWorkerArchitecture(t *testing.T) {
 	got := reconcileReleaseTest(t, r, c, hcu)
 	if got.Status.Phase != upgradev1alpha1.PhaseBlocked || !strings.Contains(got.Status.Message, "architecture") || c.writes != 0 {
 		t.Fatalf("incompatible worker architecture was accepted: %+v writes=%d", got.Status, c.writes)
+	}
+}
+
+func TestResolveImageCandidates(t *testing.T) {
+	image := "quay.io/openshift-release-dev/ocp-release:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	hcMirrors := map[string][]string{
+		"quay.io/openshift-release-dev/ocp-release": {
+			"mirror1.example.com/openshift/release-images",
+			"mirror2.example.com/openshift/release-images",
+		},
+	}
+	candidates := resolveImageCandidates(image, hcMirrors)
+	want := []string{
+		"mirror1.example.com/openshift/release-images:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		"mirror2.example.com/openshift/release-images:4.20.44-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		image,
+	}
+	if !reflect.DeepEqual(candidates, want) {
+		t.Fatalf("resolveImageCandidates() = %v, want %v", candidates, want)
+	}
+}
+
+type caRecordingResolver struct {
+	calls      []string
+	receivedCA []byte
+	shouldFail map[string]bool
+}
+
+func (r *caRecordingResolver) Resolve(ctx context.Context, image string, secret []byte) (ReleaseMetadata, error) {
+	return r.ResolveWithCA(ctx, image, secret, nil)
+}
+
+func (r *caRecordingResolver) ResolveWithCA(ctx context.Context, image string, secret, caBundle []byte) (ReleaseMetadata, error) {
+	r.calls = append(r.calls, image)
+	r.receivedCA = caBundle
+	if r.shouldFail[image] {
+		return ReleaseMetadata{}, fmt.Errorf("simulated connection failure to %s", image)
+	}
+	version, arch, err := upgradev1alpha1.ParseReleaseImageMetadata(image)
+	return ReleaseMetadata{Version: version, Architecture: arch}, err
+}
+
+func TestReleaseValidationWithImageContentSources(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePendingSchedule)
+	hcu.Spec.TargetReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	hc := regressionHC("4.20.0")
+
+	mirror := "mirror.example.com/openshift/release-images"
+	_ = unstructured.SetNestedSlice(hc.Object, []interface{}{
+		map[string]interface{}{
+			"source":  "quay.io/openshift-release-dev/ocp-release",
+			"mirrors": []interface{}{mirror},
+		},
+	}, "spec", "imageContentSources")
+
+	resolver := &caRecordingResolver{
+		shouldFail: map[string]bool{
+			hcu.Spec.TargetReleaseImage: true,
+		},
+	}
+
+	c := &regressionClient{objects: []client.Object{hcu, hc}}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: resolver}
+	got := reconcileReleaseTest(t, r, c, hcu)
+	if got.Status.Phase == upgradev1alpha1.PhaseBlocked {
+		t.Fatalf("mirror resolution should have succeeded but got blocked: %s", got.Status.Message)
+	}
+
+	expectedMirror := "mirror.example.com/openshift/release-images:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	if len(resolver.calls) == 0 || resolver.calls[0] != expectedMirror {
+		t.Fatalf("expected resolver to try mirror %s first, calls: %v", expectedMirror, resolver.calls)
+	}
+}
+
+func TestReleaseValidationWithAdditionalTrustBundle(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhasePendingSchedule)
+	hcu.Spec.TargetReleaseImage = "quay.io/openshift-release-dev/ocp-release:4.21.0-x86_64@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	hc := regressionHC("4.20.0")
+
+	_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"name": "custom-ca-bundle"}, "spec", "additionalTrustBundle")
+	caCertPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n")
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "clusters", Name: "custom-ca-bundle"},
+		Data:       map[string]string{"ca-bundle.crt": string(caCertPEM)},
+	}
+
+	resolver := &caRecordingResolver{shouldFail: map[string]bool{}}
+	c := &regressionClient{objects: []client.Object{hcu, hc, cm}}
+	r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: resolver}
+	got := reconcileReleaseTest(t, r, c, hcu)
+	if got.Status.Phase == upgradev1alpha1.PhaseBlocked {
+		t.Fatalf("reconcile with custom CA bundle got blocked: %s", got.Status.Message)
+	}
+
+	if string(resolver.receivedCA) != string(caCertPEM) {
+		t.Fatalf("resolver did not receive custom CA bundle: got %q, want %q", string(resolver.receivedCA), string(caCertPEM))
 	}
 }

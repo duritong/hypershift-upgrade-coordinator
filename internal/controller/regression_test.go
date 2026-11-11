@@ -322,6 +322,64 @@ func TestBootstrapSameVersionDifferentDigestBlocked(t *testing.T) {
 	}
 }
 
+func TestNamespaceFilterTrimsAccidentalQuotesAndLogsSkip(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseIdle)
+	hcu.SetNamespace("bit-ros-hcp-clusters")
+	hc := regressionHC("4.20.0")
+	hc.SetNamespace("bit-ros-hcp-clusters")
+	np := regressionNP("workers", "")
+	np.SetNamespace("bit-ros-hcp-clusters")
+	md := readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)
+	md.SetNamespace(WorkerControlPlaneNamespace("bit-ros-hcp-clusters", "example"))
+	c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+	addReadyCP(c, hc)
+	defer clearUpgradeGauges("bit-ros-hcp-clusters", "example")
+
+	// 1. When configured with accidental quotes: "\"bit-ros-hcp-clusters\"", it must trim and reconcile.
+	r := &HostedClusterUpgradeReconciler{
+		Client:                 c,
+		APIReader:              c,
+		ReleaseResolver:        fixtureReleaseResolver{},
+		GuestAccess:            legacyGuest(c, nil, nil),
+		HostedClusterNamespace: "\"bit-ros-hcp-clusters\"",
+	}
+	key := client.ObjectKey{Namespace: "bit-ros-hcp-clusters", Name: "example"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	got := &upgradev1alpha1.HostedClusterUpgrade{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase == "" {
+		t.Fatal("accidental quotes in HostedClusterNamespace caused reconcile to silently skip")
+	}
+
+	// 2. When configured with a truly different namespace, it must skip reconciliation.
+	hcu2 := regressionHCU("")
+	hcu2.SetNamespace("other-namespace")
+	hcu2.SetName("other")
+	c2 := &regressionClient{objects: []client.Object{hcu2}}
+	r2 := &HostedClusterUpgradeReconciler{
+		Client:                 c2,
+		APIReader:              c2,
+		ReleaseResolver:        fixtureReleaseResolver{},
+		GuestAccess:            legacyGuest(c2, nil, nil),
+		HostedClusterNamespace: "bit-ros-hcp-clusters",
+	}
+	key2 := client.ObjectKey{Namespace: "other-namespace", Name: "other"}
+	if _, err := r2.Reconcile(context.Background(), ctrl.Request{NamespacedName: key2}); err != nil {
+		t.Fatal(err)
+	}
+	got2 := &upgradev1alpha1.HostedClusterUpgrade{}
+	if err := c2.Get(context.Background(), key2, got2); err != nil {
+		t.Fatal(err)
+	}
+	if got2.Status.Phase != "" {
+		t.Fatalf("expected reconcile to skip outside target namespace, got phase: %s", got2.Status.Phase)
+	}
+}
+
 func TestNodePoolReadinessEvidence(t *testing.T) {
 	for _, tt := range []struct {
 		name                              string

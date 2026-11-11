@@ -7,23 +7,32 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - pods
   - pods/log
   verbs:
   - get
   - list
 - apiGroups:
-  - ""
-  resources:
-  - secrets
-  - services
-  verbs:
-  - get
-- apiGroups:
   - cluster.x-k8s.io
   resources:
   - machinedeployments
   - machinesets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - imagedigestmirrorsets
   verbs:
   - get
   - list
@@ -47,6 +56,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - operator.openshift.io
+  resources:
+  - imagecontentsourcepolicies
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - upgrade.0xshift.dev

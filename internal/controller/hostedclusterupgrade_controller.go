@@ -230,6 +230,9 @@ func init() {
 //+kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedcontrolplanes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get;list
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
+//+kubebuilder:rbac:groups=config.openshift.io,resources=imagedigestmirrorsets,verbs=get;list;watch
+//+kubebuilder:rbac:groups=operator.openshift.io,resources=imagecontentsourcepolicies,verbs=get;list;watch
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets,verbs=get;list;watch
 
 // Reconcile is the main state machine loop for HostedClusterUpgrade.
@@ -255,7 +258,12 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// Filter by target namespace if configured
-	if r.HostedClusterNamespace != "" && hcu.Namespace != r.HostedClusterNamespace {
+	targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" && hcu.Namespace != targetNamespace {
+		reqLogger.Info("Skipping HostedClusterUpgrade: resource namespace does not match configured target namespace",
+			"resourceNamespace", hcu.Namespace,
+			"configuredTargetNamespace", r.HostedClusterNamespace,
+			"hint", "Ensure --hosted-cluster-namespace matches the CR namespace or is empty for fleet-wide mode; check for accidental quotes")
 		return ctrl.Result{}, nil
 	}
 	if !hcu.DeletionTimestamp.IsZero() {
@@ -1718,7 +1726,8 @@ func (r *HostedClusterUpgradeReconciler) setupWithManager(mgr ctrl.Manager, name
 
 // mapHostedClusterToHostedClusterUpgrade maps HostedCluster events to the parent HostedClusterUpgrade.
 func (r *HostedClusterUpgradeReconciler) mapHostedClusterToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
-	if r.HostedClusterNamespace != "" && obj.GetNamespace() != r.HostedClusterNamespace {
+	targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" && obj.GetNamespace() != targetNamespace {
 		return nil
 	}
 	return []reconcile.Request{
@@ -1733,7 +1742,8 @@ func (r *HostedClusterUpgradeReconciler) mapHostedClusterToHostedClusterUpgrade(
 
 // mapNodePoolToHostedClusterUpgrade maps NodePool events to the parent HostedClusterUpgrade using spec.clusterName.
 func (r *HostedClusterUpgradeReconciler) mapNodePoolToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
-	if r.HostedClusterNamespace != "" && obj.GetNamespace() != r.HostedClusterNamespace {
+	targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" && obj.GetNamespace() != targetNamespace {
 		return nil
 	}
 	uObj, ok := obj.(*unstructured.Unstructured)
@@ -1758,8 +1768,9 @@ func (r *HostedClusterUpgradeReconciler) mapNodePoolToHostedClusterUpgrade(ctx c
 func (r *HostedClusterUpgradeReconciler) mapCPCToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
 	upgrades := &upgradev1alpha1.HostedClusterUpgradeList{}
 	opts := []client.ListOption{client.MatchingFields{controlPlaneNamespaceField: obj.GetNamespace()}}
-	if r.HostedClusterNamespace != "" {
-		opts = append(opts, client.InNamespace(r.HostedClusterNamespace))
+	targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" {
+		opts = append(opts, client.InNamespace(targetNamespace))
 	}
 	if err := r.List(ctx, upgrades, opts...); err != nil {
 		log.FromContext(ctx).Error(err, "Unable to route control-plane event", "namespace", obj.GetNamespace())

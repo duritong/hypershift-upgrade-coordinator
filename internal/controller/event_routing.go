@@ -83,7 +83,8 @@ func (r *HostedClusterUpgradeReconciler) listClusterNodePools(ctx context.Contex
 func (r *HostedClusterUpgradeReconciler) mapWorkerToHostedClusterUpgrade(ctx context.Context, obj client.Object) []reconcile.Request {
 	// The upstream annotation identifies the NodePool, not the HostedCluster.
 	if namespace, name, ok := strings.Cut(obj.GetAnnotations()[workerPoolAnnotation], "/"); ok && namespace != "" && name != "" {
-		if r.HostedClusterNamespace != "" && namespace != r.HostedClusterNamespace {
+		targetNamespace := strings.Trim(strings.TrimSpace(r.HostedClusterNamespace), "\"'")
+		if targetNamespace != "" && namespace != targetNamespace {
 			return nil
 		}
 		np := &unstructured.Unstructured{}

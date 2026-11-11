@@ -19,7 +19,7 @@ package main
 import (
 	"flag"
 	"os"
-
+	"strings"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -28,6 +28,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -64,7 +65,11 @@ func main() {
 	flag.StringVar(&guestObserverNamespace, "guest-observer-namespace", controller.GuestObserverNamespace, "Dedicated HUC-owned namespace for the observer ServiceAccount in each hosted cluster.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&hostedClusterNamespace, "hosted-cluster-namespace", "clusters", "The namespace of HostedCluster resources managed by this operator.")
+	defaultHCNamespace := "clusters"
+	if envVal, ok := os.LookupEnv("HOSTED_CLUSTER_NAMESPACE"); ok {
+		defaultHCNamespace = envVal
+	}
+	flag.StringVar(&hostedClusterNamespace, "hosted-cluster-namespace", defaultHCNamespace, "The namespace of HostedCluster resources managed by this operator.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -73,8 +78,11 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	hostedClusterNamespace = strings.Trim(strings.TrimSpace(hostedClusterNamespace), "\"'")
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	logger := zap.New(zap.UseFlagOptions(&opts))
+	ctrl.SetLogger(logger)
+	klog.SetLogger(logger)
 	if err := controller.ValidateGuestObserverNamespace(guestObserverNamespace); err != nil {
 		setupLog.Error(err, "invalid guest-observer-namespace")
 		os.Exit(1)

@@ -160,7 +160,8 @@ func (p *GuestAccessProvider) source(ctx context.Context, key client.ObjectKey) 
 	if p.APIReader == nil {
 		return nil, accessFailure("SourceReaderUnavailable")
 	}
-	if p.HostedClusterNamespace != "" && key.Namespace != p.HostedClusterNamespace {
+	targetNamespace := strings.Trim(strings.TrimSpace(p.HostedClusterNamespace), "\"'")
+	if targetNamespace != "" && key.Namespace != targetNamespace {
 		return nil, accessFailure("NotEnrolled")
 	}
 	hcu := &upgradev1alpha1.HostedClusterUpgrade{}

@@ -6,6 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +41,11 @@ type ReleaseMetadataResolver interface {
 	Resolve(ctx context.Context, image string, pullSecret []byte) (ReleaseMetadata, error)
 }
 
+// ReleaseMetadataResolverWithCA is an optional interface for resolvers supporting custom CA certificate bundles.
+type ReleaseMetadataResolverWithCA interface {
+	ResolveWithCA(ctx context.Context, image string, pullSecret, caBundle []byte) (ReleaseMetadata, error)
+}
+
 const releaseImageReferences = "release-manifests/image-references"
 
 // RegistryReleaseMetadataResolver has bounded network, extraction, and cache costs.
@@ -70,6 +77,10 @@ func NewRegistryReleaseMetadataResolver() *RegistryReleaseMetadataResolver {
 }
 
 func (r *RegistryReleaseMetadataResolver) Resolve(ctx context.Context, image string, pullSecret []byte) (ReleaseMetadata, error) {
+	return r.ResolveWithCA(ctx, image, pullSecret, nil)
+}
+
+func (r *RegistryReleaseMetadataResolver) ResolveWithCA(ctx context.Context, image string, pullSecret, caBundle []byte) (ReleaseMetadata, error) {
 	if r == nil || r.timeout <= 0 || r.maxBlobBytes <= 0 || r.maxExpandedBytes <= 0 || r.maxMetadataBytes <= 0 {
 		return ReleaseMetadata{}, fmt.Errorf("release metadata resolver is not initialized")
 	}
@@ -97,15 +108,23 @@ func (r *RegistryReleaseMetadataResolver) Resolve(ctx context.Context, image str
 	if err != nil {
 		return ReleaseMetadata{}, err
 	}
-	// Scope successes to credentials as well as the complete claim being checked.
-	key := fmt.Sprintf("%s:%x", image, sha256.Sum256(pullSecret))
+	// Scope successes to credentials, CA bundle, as well as the complete claim being checked.
+	key := fmt.Sprintf("%s:%x:%x", image, sha256.Sum256(pullSecret), sha256.Sum256(caBundle))
 	r.mu.Lock()
 	metadata, cached := r.cache[key]
 	r.mu.Unlock()
 	if cached {
 		return metadata, nil
 	}
-	opts := []remote.Option{remote.WithContext(ctx), remote.WithAuth(auth), remote.WithTransport(releaseBoundedTransport{r.transport, r.maxBlobBytes})}
+	transport := r.transport
+	if len(caBundle) > 0 {
+		var err error
+		transport, err = releaseTransportWithCABundle(r.transport, caBundle)
+		if err != nil {
+			return ReleaseMetadata{}, fmt.Errorf("invalid CA bundle for release registry: %w", err)
+		}
+	}
+	opts := []remote.Option{remote.WithContext(ctx), remote.WithAuth(auth), remote.WithTransport(releaseBoundedTransport{transport, r.maxBlobBytes})}
 	desc, err := remote.Get(ref, opts...)
 	if err != nil {
 		return ReleaseMetadata{}, fmt.Errorf("fetch pinned release manifest: %w", err)
@@ -207,7 +226,15 @@ func releaseRegistryAuth(secret []byte, repository name.Repository) (authn.Authe
 	if cf.CredentialsStore != "" || len(cf.CredentialHelpers) != 0 {
 		return nil, fmt.Errorf("release pull secret must contain inline auths, not credential helpers")
 	}
-	for _, key := range []string{repository.Name(), repository.RegistryStr()} {
+	candidates := []string{
+		repository.Name(),
+		repository.RegistryStr(),
+		"https://" + repository.Name(),
+		"https://" + repository.RegistryStr(),
+		"http://" + repository.Name(),
+		"http://" + repository.RegistryStr(),
+	}
+	for _, key := range candidates {
 		if key == name.DefaultRegistry {
 			key = authn.DefaultAuthKey
 		}
@@ -220,6 +247,34 @@ func releaseRegistryAuth(secret []byte, repository name.Repository) (authn.Authe
 		}
 	}
 	return authn.Anonymous, nil
+}
+
+func releaseTransportWithCABundle(base http.RoundTripper, caBundle []byte) (http.RoundTripper, error) {
+	if len(caBundle) == 0 {
+		return base, nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	} else {
+		pool = pool.Clone()
+	}
+	if !pool.AppendCertsFromPEM(caBundle) {
+		return nil, fmt.Errorf("failed to parse certificates from CA bundle")
+	}
+	var t *http.Transport
+	if baseTransport, ok := base.(*http.Transport); ok {
+		t = baseTransport.Clone()
+	} else {
+		t = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{}
+	} else {
+		t.TLSClientConfig = t.TLSClientConfig.Clone()
+	}
+	t.TLSClientConfig.RootCAs = pool
+	return t, nil
 }
 
 func (r *RegistryReleaseMetadataResolver) releaseReferences(ctx context.Context, layer v1.Layer, remaining *int64) ([]byte, error) {
