@@ -3,7 +3,7 @@ module github.com/duritong/hypershift-upgrade-coordinator
 go 1.26.10
 
 require (
-	github.com/docker/cli v29.9.2+incompatible
+	github.com/docker/cli v29.9.3+incompatible
 	github.com/google/go-containerregistry v0.22.1
 	github.com/klauspost/compress v1.20.3
 	github.com/onsi/ginkgo/v2 v2.27.4
