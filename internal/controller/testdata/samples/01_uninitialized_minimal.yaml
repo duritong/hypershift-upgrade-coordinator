@@ -1,0 +1,11 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  generation: 1
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '100001'
+  uid: 00000000-0000-4000-8000-000000000001
+spec:
+  targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222

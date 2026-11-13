@@ -1,0 +1,326 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: '{"apiVersion":"upgrade.0xshift.dev/v1alpha1","kind":"HostedClusterUpgrade","metadata":{"annotations":{},"name":"example-cluster-01","namespace":"clusters"},"spec":{"controlPlane":{},"nodePoolGroups":[{"name":"infra"},{"name":"compute"}],"rolloutPolicy":{"maxParallelNodePools":1},"targetReleaseImage":"registry.example.com/ocp-release/release:4.20.44-x86_64@sha256:1111111111111111111111111111111111111111111111111111111111111111"}}
+
+      '
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  finalizers:
+  - upgrade.huc.0xshift.dev/worker-locks
+  generation: 1
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '100001'
+  uid: 00000000-0000-4000-8000-000000000001
+spec:
+  controlPlane: {}
+  nodePoolGroups:
+  - name: infra
+  - name: compute
+  rolloutPolicy:
+    maxParallelNodePools: 1
+  targetReleaseImage: registry.example.com/ocp-release/release:4.20.44-x86_64@sha256:1111111111111111111111111111111111111111111111111111111111111111
+status:
+  aggregatedNodeStatus:
+    ready: 0
+    total: 0
+    updated: 0
+  conditions:
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Observer credential maintenance outcome
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestAccessMaintenanceReady
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Credential presence and expiration only; not proof of observer authentication
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestCredentialAvailable
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: waiting for latest controlPlaneVersion Completed history with exact expected payload and
+      version
+    observedGeneration: 1
+    reason: VerifyingControlPlane
+    status: 'False'
+    type: Ready
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: waiting for latest controlPlaneVersion Completed history with exact expected payload and
+      version
+    observedGeneration: 1
+    reason: UpgradeProgressing
+    status: 'True'
+    type: Progressing
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: waiting for latest controlPlaneVersion Completed history with exact expected payload and
+      version
+    observedGeneration: 1
+    reason: VerifyingControlPlane
+    status: 'False'
+    type: Failing
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: 'ObserveControlPlane: Converging'
+    observedGeneration: 1
+    reason: ObservationOnly
+    status: 'False'
+    type: GuestAssessmentReady
+  controlPlaneStatus:
+    blockers:
+    - 'Component ''catalog-operator'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''cluster-autoscaler'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''cluster-image-registry-operator'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''cluster-network-operator'' is not ready: RolloutIncomplete: failed to get deployment
+      cloud-network-config-controller: Deployment.apps "cloud-network-config-controller" not found'
+    - 'Component ''cluster-node-tuning-operator'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''cluster-policy-controller'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''cluster-storage-operator'' is not ready: rollout in progress or status conditions not
+      reported'
+    - 'Component ''cluster-version-operator'' is not ready: rollout in progress or status conditions not
+      reported'
+    - 'Component ''control-plane-pki-operator'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''csi-snapshot-controller-operator'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''dns-operator'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''etcd'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''featuregate-generator'' is not ready: rollout in progress or status conditions not
+      reported'
+    - 'Component ''hosted-cluster-config-operator'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''ignition-server'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''ignition-server-proxy'' is not ready: rollout in progress or status conditions not
+      reported'
+    - 'Component ''ingress-operator'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''konnectivity-agent'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''kube-apiserver'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''kube-controller-manager'' is not ready: rollout in progress or status conditions not
+      reported'
+    - 'Component ''kube-scheduler'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''machine-approver'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''oauth-openshift'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''olm-collect-profiles'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''olm-operator'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''openshift-apiserver'' is not ready: rollout in progress or status conditions not reported'
+    - 'Component ''openshift-controller-manager'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''openshift-oauth-apiserver'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''openshift-route-controller-manager'' is not ready: rollout in progress or status conditions
+      not reported'
+    - 'Component ''packageserver'' is not ready: rollout in progress or status conditions not reported'
+    components:
+    - available: true
+      name: capi-provider
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: catalog-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-api
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-autoscaler
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-image-registry-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: failed to get deployment cloud-network-config-controller: Deployment.apps
+        "cloud-network-config-controller" not found'
+      name: cluster-network-operator
+      rolloutComplete: false
+      version: ''
+    - available: true
+      name: cluster-node-tuning-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-policy-controller
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-storage-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: cluster-version-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: control-plane-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: control-plane-pki-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: csi-snapshot-controller-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: dns-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: etcd
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: featuregate-generator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: hosted-cluster-config-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: ignition-server
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: ignition-server-proxy
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: ingress-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: konnectivity-agent
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: kube-apiserver
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: kube-controller-manager
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: kube-scheduler
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: machine-approver
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: oauth-openshift
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: olm-collect-profiles
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: olm-operator
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: openshift-apiserver
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: openshift-controller-manager
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: openshift-oauth-apiserver
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: openshift-route-controller-manager
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: packageserver
+      rolloutComplete: true
+      version: 4.20.44
+    targetReleaseImage: registry.example.com/ocp-release/release:4.20.44-x86_64@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    totalComponents: 33
+    upgradedComponents: 3
+  guestAccess:
+    clusterID: 00000000-0000-4000-8000-000000000002
+    clusterVersionUID: 00000000-0000-4000-8000-000000000003
+    credentialAvailable: true
+    endpointRevision: '2222222222222222222222222222222222222222222222222222222222222222'
+    expiresAt: '2026-01-15T09:00:00Z'
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    maintenanceReady: true
+    observedGeneration: 1
+    observerUsability: Unknown
+    profileRevision: observer-v2
+    reason: CredentialCurrent
+    secretName: guest-observer-00000000-0000-4000-8000-000000000004
+  guestAssessment:
+    blockerCount: 0
+    expectedVersion: 4.20.44
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    lastAttemptTime: '2026-01-15T08:05:00Z'
+    lastSuccessfulObservation: '2026-01-15T08:05:00Z'
+    observedGeneration: 1
+    operators:
+    - name: console
+      version: 4.20.44
+    - name: csi-snapshot-controller
+      version: 4.20.44
+    - name: dns
+      version: 4.20.44
+    - name: image-registry
+      version: 4.20.44
+    - name: ingress
+      version: 4.20.44
+    - name: insights
+      version: 4.20.44
+    - name: kube-apiserver
+      version: 4.20.44
+    - name: kube-controller-manager
+      version: 4.20.44
+    - name: kube-scheduler
+      version: 4.20.44
+    - name: kube-storage-version-migrator
+      version: 4.20.44
+    - name: monitoring
+      version: 4.20.44
+    - name: network
+      version: 4.20.44
+    - name: node-tuning
+      version: 4.20.44
+    - name: openshift-apiserver
+      version: 4.20.44
+    - name: openshift-controller-manager
+      version: 4.20.44
+    - name: operator-lifecycle-manager
+      version: 4.20.44
+    - name: operator-lifecycle-manager-catalog
+      version: 4.20.44
+    - name: operator-lifecycle-manager-packageserver
+      version: 4.20.44
+    - name: service-ca
+      version: 4.20.44
+    - name: storage
+      version: 4.20.44
+    planRevision: '3333333333333333333333333333333333333333333333333333333333333333'
+    purpose: ObserveControlPlane
+    reason: ObservationOnly
+    secretRevision: '100000'
+    secretUID: 00000000-0000-4000-8000-000000000005
+    state: Converging
+    truncated: false
+  initialVersion: 4.20.44
+  message: waiting for latest controlPlaneVersion Completed history with exact expected payload and version
+  observedGeneration: 1
+  phase: VerifyingControlPlane
+  startTime: '2026-01-15T08:01:00Z'

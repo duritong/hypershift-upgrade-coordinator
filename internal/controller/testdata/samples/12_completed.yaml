@@ -1,0 +1,124 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  generation: 1
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '100001'
+  uid: 00000000-0000-4000-8000-000000000001
+  finalizers:
+  - upgrade.huc.0xshift.dev/worker-locks
+spec:
+  controlPlane: {}
+  nodePoolGroups:
+  - name: infra
+  - name: compute
+  rolloutPolicy:
+    maxParallelNodePools: 1
+  targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+status:
+  aggregatedNodeStatus:
+    ready: 6
+    total: 6
+    updated: 6
+  completionTime: '2026-01-15T09:00:00Z'
+  conditions:
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Observer credential maintenance outcome
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestAccessMaintenanceReady
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Credential presence and expiration only; not proof of observer authentication
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestCredentialAvailable
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: All worker NodePools successfully upgraded and verified on target version.
+    observedGeneration: 1
+    reason: UpgradeCompleted
+    status: 'True'
+    type: Ready
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: All worker NodePools successfully upgraded and verified on target version.
+    observedGeneration: 1
+    reason: Completed
+    status: 'False'
+    type: Progressing
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: All worker NodePools successfully upgraded and verified on target version.
+    observedGeneration: 1
+    reason: Completed
+    status: 'False'
+    type: Failing
+  controlPlaneStatus:
+    step: Target (4.21.42)
+    targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+    totalComponents: 2
+    upgradedComponents: 2
+    components:
+    - available: true
+      name: etcd
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: kube-apiserver
+      rolloutComplete: true
+      version: 4.21.42
+  guestAccess:
+    clusterID: 00000000-0000-4000-8000-000000000002
+    clusterVersionUID: 00000000-0000-4000-8000-000000000003
+    credentialAvailable: true
+    endpointRevision: '2222222222222222222222222222222222222222222222222222222222222222'
+    expiresAt: '2026-01-15T09:00:00Z'
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    maintenanceReady: true
+    observedGeneration: 1
+    observerUsability: Ready
+    profileRevision: observer-v2
+    reason: CredentialCurrent
+    secretName: guest-observer-00000000-0000-4000-8000-000000000004
+  guestAssessment:
+    blockerCount: 0
+    expectedVersion: 4.21.42
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    lastAttemptTime: '2026-01-15T09:00:00Z'
+    lastSuccessfulObservation: '2026-01-15T09:00:00Z'
+    observedGeneration: 1
+    operators:
+    - name: console
+      version: 4.21.42
+    - name: network
+      version: 4.21.42
+    planRevision: '3333333333333333333333333333333333333333333333333333333333333333'
+    purpose: FinalUpgradeVerification
+    reason: GuestReady
+    secretRevision: '100000'
+    secretUID: 00000000-0000-4000-8000-000000000005
+    state: Ready
+    truncated: false
+  initialVersion: 4.20.44
+  message: All worker NodePools successfully upgraded and verified on target version.
+  nodePoolStatuses:
+  - group: infra
+    name: workers-infra
+    nodes:
+      ready: 3
+      total: 3
+      updated: 3
+    phase: Completed
+    targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  - group: compute
+    name: workers-compute
+    nodes:
+      ready: 3
+      total: 3
+      updated: 3
+    phase: Completed
+    targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  observedGeneration: 1
+  phase: Completed
+  startTime: '2026-01-15T08:01:00Z'

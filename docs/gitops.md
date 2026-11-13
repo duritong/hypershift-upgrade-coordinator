@@ -154,37 +154,258 @@ spec:
 
 ## 5. ArgoCD Custom Lua Health Check
 
-By default, ArgoCD may mark `HostedClusterUpgrade` resources as `Degraded` when an upgrade is paused or temporarily waiting for a schedule.
+By default, ArgoCD has no built-in health assessment for `HostedClusterUpgrade` and cannot distinguish active rollouts, scheduled waits (`Progressing`), coordinator pauses (`Suspended`), or blocked gates (`Degraded`).
 
-To map phases accurately in the ArgoCD web console, register this custom Lua health check in the `argocd-cm` ConfigMap under `resource.customizations.health.upgrade.0xshift.dev_HostedClusterUpgrade`:
+Following the [Argo CD Resource Health Guidelines](https://argo-cd.readthedocs.io/en/stable/operator-manual/health/#guidelines-for-writing-good-health-checks), the Lua health check inspects:
+- `metadata.deletionTimestamp` and the `upgrade.huc.0xshift.dev/worker-locks` finalizer for terminating resources (`deletionMessage`).
+- `status.observedGeneration` and condition `observedGeneration` against `metadata.generation` so Day-2 spec updates do not flap `Healthy` on stale status from an earlier completed upgrade.
+- Standard Kubernetes `status.conditions` (`Failing`, `Progressing`, `Ready`) and pause reason/phase (`Paused` -> `Suspended`), using only base/table Lua primitives compatible with Argo CD's default sandbox (`useOpenLibs: false`).
+
+### A. OpenShift GitOps / Argo CD Operator (`ArgoCD` CR)
+
+When Argo CD is managed by the Argo CD Operator or Red Hat OpenShift GitOps (`argoproj.io/v1beta1`), configure `spec.resourceHealthChecks` on the `ArgoCD` CR. Do **not** use the removed `spec.resourceCustomizations` field (unsupported since Argo CD Operator v0.8.0) or edit `argocd-cm` directly (overwritten by the operator):
 
 ```yaml
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+spec:
+  resourceHealthChecks:
+    - group: upgrade.0xshift.dev
+      kind: HostedClusterUpgrade
+      check: |
+        local function nonEmpty(msg, fallback)
+          if msg ~= nil and msg ~= "" then
+            return msg
+          end
+          return fallback
+        end
+
+        if obj.metadata ~= nil and obj.metadata.deletionTimestamp ~= nil then
+          local hs = {}
+          hs.status = "Progressing"
+          local msg = "Deleting HostedClusterUpgrade"
+          if obj.metadata.finalizers ~= nil then
+            for _, f in ipairs(obj.metadata.finalizers) do
+              if f == "upgrade.huc.0xshift.dev/worker-locks" then
+                msg = msg .. ": restoring coordinator-owned NodePool pause locks (" .. f .. ")"
+              end
+            end
+          end
+          hs.message = msg
+          hs.deletionMessage = msg
+          return hs
+        end
+
+        local hs = {}
+        if obj.status ~= nil then
+          if obj.metadata ~= nil and obj.metadata.generation ~= nil then
+            if obj.status.observedGeneration ~= nil and obj.status.observedGeneration < obj.metadata.generation then
+              hs.status = "Progressing"
+              hs.message = "Waiting for upgrade spec update to be observed"
+              return hs
+            end
+          end
+
+          if obj.status.conditions ~= nil then
+            local ready = nil
+            local progressing = nil
+            local failing = nil
+            for _, condition in ipairs(obj.status.conditions) do
+              if condition.type == "Ready" then
+                ready = condition
+              elseif condition.type == "Progressing" then
+                progressing = condition
+              elseif condition.type == "Failing" then
+                failing = condition
+              end
+            end
+
+            if ready ~= nil and obj.metadata ~= nil and obj.metadata.generation ~= nil then
+              if ready.observedGeneration ~= nil and ready.observedGeneration < obj.metadata.generation then
+                hs.status = "Progressing"
+                hs.message = "Waiting for upgrade spec update to be observed"
+                return hs
+              end
+            end
+
+            if failing ~= nil and failing.status == "True" then
+              hs.status = "Degraded"
+              hs.message = nonEmpty(failing.message, nonEmpty(obj.status.message, "Upgrade is blocked."))
+              return hs
+            end
+
+            if ready ~= nil and ready.reason == "Paused" then
+              hs.status = "Suspended"
+              hs.message = nonEmpty(ready.message, nonEmpty(obj.status.message, "Upgrade coordinator is paused."))
+              return hs
+            end
+
+            if progressing ~= nil and progressing.status == "True" then
+              hs.status = "Progressing"
+              hs.message = nonEmpty(progressing.message, nonEmpty(obj.status.message, "Upgrade is in progress."))
+              return hs
+            end
+
+            if ready ~= nil and ready.status == "True" then
+              hs.status = "Healthy"
+              hs.message = nonEmpty(ready.message, nonEmpty(obj.status.message, "Upgrade completed successfully."))
+              return hs
+            end
+          end
+
+          if obj.status.observedGeneration ~= nil then
+            if obj.status.phase == "Blocked" then
+              hs.status = "Degraded"
+              hs.message = nonEmpty(obj.status.message, "Upgrade is blocked.")
+              return hs
+            end
+            if obj.status.phase == "Paused" then
+              hs.status = "Suspended"
+              hs.message = nonEmpty(obj.status.message, "Upgrade coordinator is paused.")
+              return hs
+            end
+            if obj.status.phase == "Completed" then
+              hs.status = "Healthy"
+              hs.message = nonEmpty(obj.status.message, "Upgrade completed successfully.")
+              return hs
+            end
+            if obj.status.phase ~= nil and obj.status.phase ~= "" then
+              hs.status = "Progressing"
+              hs.message = nonEmpty(obj.status.message, "Upgrade is in progress.")
+              return hs
+            end
+          end
+        end
+
+        hs.status = "Progressing"
+        hs.message = "Initializing upgrade coordinator..."
+        return hs
+```
+
+### B. Standalone Argo CD (`argocd-cm` ConfigMap)
+
+On standalone Argo CD installations not managed by `argocd-operator`, register the same Lua script under the per-resource key `resource.customizations.health.upgrade.0xshift.dev_HostedClusterUpgrade` in `argocd-cm` (rather than the legacy `resource.customizations` subkey map):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
 data:
   resource.customizations.health.upgrade.0xshift.dev_HostedClusterUpgrade: |
-    hs = {}
+    local function nonEmpty(msg, fallback)
+      if msg ~= nil and msg ~= "" then
+        return msg
+      end
+      return fallback
+    end
+
+    if obj.metadata ~= nil and obj.metadata.deletionTimestamp ~= nil then
+      local hs = {}
+      hs.status = "Progressing"
+      local msg = "Deleting HostedClusterUpgrade"
+      if obj.metadata.finalizers ~= nil then
+        for _, f in ipairs(obj.metadata.finalizers) do
+          if f == "upgrade.huc.0xshift.dev/worker-locks" then
+            msg = msg .. ": restoring coordinator-owned NodePool pause locks (" .. f .. ")"
+          end
+        end
+      end
+      hs.message = msg
+      hs.deletionMessage = msg
+      return hs
+    end
+
+    local hs = {}
     if obj.status ~= nil then
-      if obj.status.phase == "Completed" then
-        hs.status = "Healthy"
-        hs.message = obj.status.message or "Upgrade completed successfully."
-        return hs
+      if obj.metadata ~= nil and obj.metadata.generation ~= nil then
+        if obj.status.observedGeneration ~= nil and obj.status.observedGeneration < obj.metadata.generation then
+          hs.status = "Progressing"
+          hs.message = "Waiting for upgrade spec update to be observed"
+          return hs
+        end
       end
-      if obj.status.phase == "Paused" then
-        hs.status = "Suspended"
-        hs.message = obj.status.message or "Upgrade coordinator is paused."
-        return hs
+
+      if obj.status.conditions ~= nil then
+        local ready = nil
+        local progressing = nil
+        local failing = nil
+        for _, condition in ipairs(obj.status.conditions) do
+          if condition.type == "Ready" then
+            ready = condition
+          elseif condition.type == "Progressing" then
+            progressing = condition
+          elseif condition.type == "Failing" then
+            failing = condition
+          end
+        end
+
+        if ready ~= nil and obj.metadata ~= nil and obj.metadata.generation ~= nil then
+          if ready.observedGeneration ~= nil and ready.observedGeneration < obj.metadata.generation then
+            hs.status = "Progressing"
+            hs.message = "Waiting for upgrade spec update to be observed"
+            return hs
+          end
+        end
+
+        if failing ~= nil and failing.status == "True" then
+          hs.status = "Degraded"
+          hs.message = nonEmpty(failing.message, nonEmpty(obj.status.message, "Upgrade is blocked."))
+          return hs
+        end
+
+        if ready ~= nil and ready.reason == "Paused" then
+          hs.status = "Suspended"
+          hs.message = nonEmpty(ready.message, nonEmpty(obj.status.message, "Upgrade coordinator is paused."))
+          return hs
+        end
+
+        if progressing ~= nil and progressing.status == "True" then
+          hs.status = "Progressing"
+          hs.message = nonEmpty(progressing.message, nonEmpty(obj.status.message, "Upgrade is in progress."))
+          return hs
+        end
+
+        if ready ~= nil and ready.status == "True" then
+          hs.status = "Healthy"
+          hs.message = nonEmpty(ready.message, nonEmpty(obj.status.message, "Upgrade completed successfully."))
+          return hs
+        end
       end
-      if obj.status.phase == "Blocked" then
-        hs.status = "Degraded"
-        hs.message = obj.status.message or "Upgrade is blocked."
-        return hs
-      end
-      if obj.status.phase == "PreflightChecks" or obj.status.phase == "PendingSchedule" or obj.status.phase == "UpgradingControlPlane" or obj.status.phase == "VerifyingControlPlane" or obj.status.phase == "UpgradingNodePools" then
-        hs.status = "Progressing"
-        hs.message = obj.status.message or "Upgrade is in progress."
-        return hs
+
+      if obj.status.observedGeneration ~= nil then
+        if obj.status.phase == "Blocked" then
+          hs.status = "Degraded"
+          hs.message = nonEmpty(obj.status.message, "Upgrade is blocked.")
+          return hs
+        end
+        if obj.status.phase == "Paused" then
+          hs.status = "Suspended"
+          hs.message = nonEmpty(obj.status.message, "Upgrade coordinator is paused.")
+          return hs
+        end
+        if obj.status.phase == "Completed" then
+          hs.status = "Healthy"
+          hs.message = nonEmpty(obj.status.message, "Upgrade completed successfully.")
+          return hs
+        end
+        if obj.status.phase ~= nil and obj.status.phase ~= "" then
+          hs.status = "Progressing"
+          hs.message = nonEmpty(obj.status.message, "Upgrade is in progress.")
+          return hs
+        end
       end
     end
+
     hs.status = "Progressing"
     hs.message = "Initializing upgrade coordinator..."
     return hs
 ```
+
+### Verification
+
+Run `go test ./internal/controller -run '^(TestHostedClusterUpgradeSamples|TestArgoCDHealthCheckEdgeCases)$' -count=1` to validate every sample manifest in `internal/controller/testdata/samples/` against strict Go deserialization, the generated CRD OpenAPI v3 schema, and Argo CD's restricted Lua sandbox (`useOpenLibs: false`).

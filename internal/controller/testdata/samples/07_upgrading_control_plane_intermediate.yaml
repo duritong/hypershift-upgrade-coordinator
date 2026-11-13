@@ -1,0 +1,81 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  generation: 1
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '100001'
+  uid: 00000000-0000-4000-8000-000000000001
+  finalizers:
+  - upgrade.huc.0xshift.dev/worker-locks
+spec:
+  controlPlane: {}
+  intermediateReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  targetReleaseImage: registry.example.com/ocp-release/release:4.22.22-x86_64@sha256:3333333333333333333333333333333333333333333333333333333333333333
+status:
+  conditions:
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Observer credential maintenance outcome
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestAccessMaintenanceReady
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Credential presence and expiration only; not proof of observer authentication
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestCredentialAvailable
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Initiating Intermediate (4.21.42) Control Plane rollout.
+    observedGeneration: 1
+    reason: UpgradingControlPlane
+    status: 'False'
+    type: Ready
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Initiating Intermediate (4.21.42) Control Plane rollout.
+    observedGeneration: 1
+    reason: UpgradeProgressing
+    status: 'True'
+    type: Progressing
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Initiating Intermediate (4.21.42) Control Plane rollout.
+    observedGeneration: 1
+    reason: UpgradingControlPlane
+    status: 'False'
+    type: Failing
+  controlPlaneStatus:
+    startTime: '2026-01-15T08:05:00Z'
+    step: Intermediate (4.21.42)
+    targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+    totalComponents: 2
+    upgradedComponents: 0
+    components:
+    - available: true
+      name: etcd
+      rolloutComplete: true
+      version: 4.20.44
+    - available: true
+      name: kube-apiserver
+      rolloutComplete: false
+      version: 4.20.44
+      message: Rolling out 4.21.42
+  guestAccess:
+    clusterID: 00000000-0000-4000-8000-000000000002
+    clusterVersionUID: 00000000-0000-4000-8000-000000000003
+    credentialAvailable: true
+    endpointRevision: '2222222222222222222222222222222222222222222222222222222222222222'
+    expiresAt: '2026-01-15T09:00:00Z'
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    maintenanceReady: true
+    observedGeneration: 1
+    observerUsability: Ready
+    profileRevision: observer-v2
+    reason: CredentialCurrent
+    secretName: guest-observer-00000000-0000-4000-8000-000000000004
+  initialVersion: 4.20.44
+  message: Initiating Intermediate (4.21.42) Control Plane rollout.
+  observedGeneration: 1
+  phase: UpgradingControlPlane
+  startTime: '2026-01-15T08:05:00Z'

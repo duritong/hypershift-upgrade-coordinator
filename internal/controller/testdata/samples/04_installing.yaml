@@ -1,0 +1,50 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  generation: 1
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '100001'
+  uid: 00000000-0000-4000-8000-000000000001
+  finalizers:
+  - upgrade.huc.0xshift.dev/worker-locks
+spec:
+  controlPlane: {}
+  targetReleaseImage: registry.example.com/ocp-release/release:4.20.44-x86_64@sha256:1111111111111111111111111111111111111111111111111111111111111111
+status:
+  conditions:
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Observer credential maintenance outcome
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestAccessMaintenanceReady
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: Credential presence and expiration only; not proof of observer authentication
+    observedGeneration: 1
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestCredentialAvailable
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: HostedCluster is currently in initial installation. Waiting for completion.
+    observedGeneration: 1
+    reason: Installing
+    status: 'False'
+    type: Ready
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: HostedCluster is currently in initial installation. Waiting for completion.
+    observedGeneration: 1
+    reason: UpgradeProgressing
+    status: 'True'
+    type: Progressing
+  - lastTransitionTime: '2026-01-15T08:05:00Z'
+    message: HostedCluster is currently in initial installation. Waiting for completion.
+    observedGeneration: 1
+    reason: Installing
+    status: 'False'
+    type: Failing
+  initialVersion: 4.20.44
+  message: HostedCluster is currently in initial installation. Waiting for completion.
+  observedGeneration: 1
+  phase: Installing
