@@ -1051,9 +1051,12 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 		currentVer = "unknown"
 	}
 	targetVer, _ := upgradev1alpha1.ExtractVersion(hcu.Spec.TargetReleaseImage)
-	// Read through the informer-backed client so deletion and version changes also
-	// refresh worker gauges while the coordinator is paused or already completed.
+	// Read through the informer-backed client so deletion, version, and group
+	// label changes refresh worker gauges and status outside active actuation.
 	if pools, err := r.listClusterNodePools(ctx, hcu.Namespace, hcu.Name); err == nil {
+		reqLogger := log.FromContext(ctx)
+		groupRank, groupSchedules := nodePoolGroupOrder(hcu.Spec)
+		syncPoolLayout := hcu.Status.Phase != upgradev1alpha1.PhaseUpgradingNodePools
 		metricNodePoolBlocked.DeletePartialMatch(labels)
 		metricNodePoolRolloutRatio.DeletePartialMatch(labels)
 		metricAggregatedNodeRolloutRatio.DeletePartialMatch(labels)
@@ -1065,6 +1068,12 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 				continue
 			}
 			livePools[np.GetName()] = true
+			groupName := nodePoolGroupName(&np)
+			var schedStart *metav1.Time
+			if s := groupSchedules[groupName]; s != nil {
+				cp := *s
+				schedStart = &cp
+			}
 			var blocked float64
 			for _, status := range hcu.Status.NodePoolStatuses {
 				if status.Name == np.GetName() && status.TargetReleaseImage == hcu.Spec.TargetReleaseImage && len(status.Blockers) > 0 {
@@ -1077,19 +1086,47 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			total += replicas
 			updated += upgraded
 			ready += readyNodes
-			if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+			if syncPoolLayout {
+				foundStatus := false
 				for i := range hcu.Status.NodePoolStatuses {
 					status := &hcu.Status.NodePoolStatuses[i]
 					if status.Name != np.GetName() {
 						continue
 					}
-					status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
-					if assessmentErr == nil && assessment.complete {
-						status.Phase = "Completed"
-						status.StartTime = nil
-						status.Blockers = nil
-						metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), currentVer, targetVer).Set(0)
+					foundStatus = true
+					if status.Group != "" && status.Group != groupName {
+						reqLogger.Info("Reorganized NodePool group assignment",
+							"nodePool", np.GetName(),
+							"previousGroup", status.Group,
+							"group", groupName,
+							"phase", hcu.Status.Phase)
 					}
+					status.Group = groupName
+					status.ScheduledStart = schedStart
+					if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+						status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
+						if assessmentErr == nil && assessment.complete {
+							status.Phase = "Completed"
+							status.StartTime = nil
+							status.Blockers = nil
+							metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), currentVer, targetVer).Set(0)
+						}
+					} else if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted && assessmentErr == nil {
+						status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
+					}
+				}
+				if !foundStatus && hcu.Status.Phase == upgradev1alpha1.PhaseCompleted && assessmentErr == nil && assessment.complete {
+					reqLogger.Info("Enrolled completed NodePool into status",
+						"nodePool", np.GetName(),
+						"group", groupName)
+					hcu.Status.NodePoolStatuses = append(hcu.Status.NodePoolStatuses, upgradev1alpha1.NodePoolUpgradeStatus{
+						Name:               np.GetName(),
+						Group:              groupName,
+						TargetReleaseImage: hcu.Spec.TargetReleaseImage,
+						ScheduledStart:     schedStart,
+						Phase:              "Completed",
+						Nodes:              upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes},
+					})
 				}
 			}
 			var ratio float64
@@ -1103,7 +1140,7 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			ratio = float64(updated) / float64(total)
 		}
 		metricAggregatedNodeRolloutRatio.WithLabelValues(hcu.Namespace, hcu.Name).Set(ratio)
-		if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+		if hcu.Status.Phase == upgradev1alpha1.PhasePaused || hcu.Status.Phase == upgradev1alpha1.PhaseCompleted {
 			hcu.Status.AggregatedNodeStatus = upgradev1alpha1.NodeStatusSummary{Total: total, Updated: updated, Ready: ready}
 		}
 		statuses := hcu.Status.NodePoolStatuses[:0]
@@ -1111,6 +1148,24 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			if livePools[status.Name] {
 				statuses = append(statuses, status)
 			}
+		}
+		if syncPoolLayout && len(statuses) > 1 {
+			rankOf := func(group string) int {
+				if r, ok := groupRank[group]; ok {
+					return r
+				}
+				return len(groupRank)
+			}
+			sort.SliceStable(statuses, func(i, j int) bool {
+				ri, rj := rankOf(statuses[i].Group), rankOf(statuses[j].Group)
+				if ri != rj {
+					return ri < rj
+				}
+				if statuses[i].Group != statuses[j].Group {
+					return statuses[i].Group < statuses[j].Group
+				}
+				return statuses[i].Name < statuses[j].Name
+			})
 		}
 		hcu.Status.NodePoolStatuses = statuses
 	}
@@ -1140,6 +1195,38 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			metricStepDuration.WithLabelValues(hcu.Namespace, hcu.Name, "NodePool-"+np.Name, currentVer, targetVer).Set(r.now().Sub(np.StartTime.Time).Seconds())
 		}
 	}
+}
+
+func nodePoolGroupName(np *unstructured.Unstructured) string {
+	if group := np.GetLabels()["upgrade.huc.0xshift.dev/group"]; group != "" {
+		return group
+	}
+	return "default"
+}
+
+func nodePoolGroupOrder(spec upgradev1alpha1.HostedClusterUpgradeSpec) (map[string]int, map[string]*metav1.Time) {
+	ranks := make(map[string]int, len(spec.NodePoolGroups)+1)
+	schedules := make(map[string]*metav1.Time, len(spec.NodePoolGroups))
+	hasDefault := false
+	for _, g := range spec.NodePoolGroups {
+		if g.Name == "" {
+			continue
+		}
+		if _, seen := ranks[g.Name]; !seen {
+			ranks[g.Name] = len(ranks)
+		}
+		if g.Name == "default" {
+			hasDefault = true
+		}
+		if g.StartAt != nil {
+			t := metav1.NewTime(g.StartAt.Time)
+			schedules[g.Name] = &t
+		}
+	}
+	if !hasDefault {
+		ranks["default"] = len(ranks)
+	}
+	return ranks, schedules
 }
 
 // reconcileNodePools fetches all associated NodePools, clusters them into priority groups, and triggers upgrades.
@@ -1348,6 +1435,13 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 			hcuStatuses[i].Name = np.name
 			for _, previous := range previousStatuses {
 				if previous.Name == np.name {
+					if previous.Group != "" && previous.Group != group {
+						reqLogger.Info("Reorganized NodePool group assignment",
+							"nodePool", np.name,
+							"previousGroup", previous.Group,
+							"group", group,
+							"phase", hcu.Status.Phase)
+					}
 					hcuStatuses[i] = previous
 					break
 				}

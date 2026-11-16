@@ -130,6 +130,134 @@ var _ = Describe("Primary upgrade event filtering", func() {
 		}, 5*time.Second, 25*time.Millisecond).Should(Succeed())
 		Consistently(provider.reads.Load, time.Second, 25*time.Millisecond).Should(Equal(int64(2)))
 	})
+
+	It("reorganizes completed NodePoolStatuses via NodePool watch when group labels are added", func() {
+		const namespace = "nodepool-label-watch"
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "pull-secret"},
+			Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+		})).To(Succeed())
+
+		targetImg := regressionImage("4.20.0")
+		hc := createAndSetStatusHostedCluster(ctx, "label-reorg", namespace, targetImg)
+		createReadyControlPlane(ctx, hc)
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, hc) })
+
+		npAZ2 := createAndSetStatusNodePool(ctx, "pool-az2", namespace, hc.GetName(), targetImg)
+		npAZ3 := createAndSetStatusNodePool(ctx, "pool-az3", namespace, hc.GetName(), targetImg)
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, npAZ2); _ = k8sClient.Delete(ctx, npAZ3) })
+
+		version := fixtureCV(targetImg, "a5e99fb2-0598-4b34-9081-14236b744c16")
+		operators := fixtureOperators(targetImg)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Header.Get("Authorization") != "Bearer observer-token" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			switch r.URL.Path {
+			case "/apis/config.openshift.io/v1/clusterversions/version":
+				_ = json.NewEncoder(w).Encode(version)
+			case "/apis/config.openshift.io/v1/clusteroperators":
+				_ = json.NewEncoder(w).Encode(configv1.ClusterOperatorList{
+					TypeMeta: metav1.TypeMeta{Kind: "ClusterOperatorList", APIVersion: "config.openshift.io/v1"},
+					ListMeta: metav1.ListMeta{ResourceVersion: "1"},
+					Items:    operators,
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		restCfg := &rest.Config{
+			Host:            server.URL,
+			TLSClientConfig: rest.TLSClientConfig{CAData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})},
+		}
+		kubeconfigBytes, err := observerKubeconfig(restCfg, "observer-token")
+		Expect(err).NotTo(HaveOccurred())
+
+		u := &upgradev1.HostedClusterUpgrade{
+			ObjectMeta: metav1.ObjectMeta{Name: hc.GetName(), Namespace: namespace},
+			Spec: upgradev1.HostedClusterUpgradeSpec{
+				TargetReleaseImage: targetImg,
+				NodePoolGroups: []upgradev1.NodePoolGroupSpec{
+					{Name: "az3"},
+					{Name: "az2"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, u); clearUpgradeGauges(namespace, u.Name) })
+
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  k8sClient.Scheme(),
+			Client:  client.Options{Cache: &client.CacheOptions{Unstructured: true}},
+			Metrics: metricsserver.Options{BindAddress: "0"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		provider := &watchGuestReader{legacyGuestAccess: &legacyGuestAccess{client: mgr.GetAPIReader()}, kubeconfig: kubeconfigBytes}
+		r := &HostedClusterUpgradeReconciler{
+			Client:                 mgr.GetClient(),
+			APIReader:              mgr.GetAPIReader(),
+			Scheme:                 mgr.GetScheme(),
+			HostedClusterNamespace: namespace,
+			ReleaseResolver:        fixtureReleaseResolver{},
+			GuestAccess:            provider,
+		}
+		Expect(r.setupWithManager(mgr, "upgrade-nodepool-label-watch")).To(Succeed())
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- mgr.Start(runCtx) }()
+		defer func() { stop(); Eventually(done, 10*time.Second).Should(Receive(BeNil())) }()
+
+		key := client.ObjectKeyFromObject(u)
+		Eventually(func(g Gomega) {
+			fresh := &upgradev1.HostedClusterUpgrade{}
+			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+			g.Expect(fresh.Status.Phase).To(Equal(upgradev1.PhaseCompleted))
+			g.Expect(fresh.Status.NodePoolStatuses).To(HaveLen(2))
+			g.Expect(fresh.Status.NodePoolStatuses[0].Name).To(Equal("pool-az2"))
+			g.Expect(fresh.Status.NodePoolStatuses[0].Group).To(Equal("default"))
+			g.Expect(fresh.Status.NodePoolStatuses[1].Name).To(Equal("pool-az3"))
+			g.Expect(fresh.Status.NodePoolStatuses[1].Group).To(Equal("default"))
+		}, 10*time.Second, 25*time.Millisecond).Should(Succeed())
+
+		// Add group labels directly to the NodePools without touching HostedClusterUpgrade.
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(npAZ2), npAZ2)).To(Succeed())
+		npAZ2.SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "az2"})
+		Expect(k8sClient.Update(ctx, npAZ2)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(npAZ3), npAZ3)).To(Succeed())
+		npAZ3.SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "az3"})
+		Expect(k8sClient.Update(ctx, npAZ3)).To(Succeed())
+
+		var settledRV string
+		Eventually(func(g Gomega) {
+			fresh := &upgradev1.HostedClusterUpgrade{}
+			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+			g.Expect(fresh.Status.Phase).To(Equal(upgradev1.PhaseCompleted))
+			g.Expect(fresh.Status.NodePoolStatuses).To(HaveLen(2))
+			// az3 precedes az2 in spec.nodePoolGroups, reversing the alphabetical order.
+			g.Expect(fresh.Status.NodePoolStatuses[0].Name).To(Equal("pool-az3"))
+			g.Expect(fresh.Status.NodePoolStatuses[0].Group).To(Equal("az3"))
+			g.Expect(fresh.Status.NodePoolStatuses[1].Name).To(Equal("pool-az2"))
+			g.Expect(fresh.Status.NodePoolStatuses[1].Group).To(Equal("az2"))
+			settledRV = fresh.ResourceVersion
+		}, 10*time.Second, 25*time.Millisecond).Should(Succeed())
+
+		// Own status reorganization must not trigger a self-requeue hot loop.
+		Consistently(func() string {
+			fresh := &upgradev1.HostedClusterUpgrade{}
+			if k8sClient.Get(ctx, key, fresh) != nil {
+				return ""
+			}
+			return fresh.ResourceVersion
+		}, 500*time.Millisecond, 25*time.Millisecond).Should(Equal(settledRV))
+	})
 })
 
 type fleetWatchGuestReaders map[client.ObjectKey]*watchGuestReader

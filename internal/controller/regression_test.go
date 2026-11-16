@@ -434,3 +434,100 @@ func TestNodePoolMissingReadinessDoesNotComplete(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveNodePoolGroupReorganization(t *testing.T) {
+	hcu := regressionHCU(upgradev1alpha1.PhaseCompleted)
+	hcu.Status.ObservedGeneration = 1
+	hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+	started := metav1.NewTime(time.Now().Add(-time.Hour))
+	hcu.Status.StartTime, hcu.Status.CompletionTime = &started, &started
+	t3 := metav1.NewTime(time.Date(2026, 8, 15, 3, 0, 0, 0, time.UTC))
+	t2 := metav1.NewTime(time.Date(2026, 8, 15, 4, 0, 0, 0, time.UTC))
+	// Place az3 ahead of az2 so spec priority differs from alphabetical name order.
+	hcu.Spec.NodePoolGroups = []upgradev1alpha1.NodePoolGroupSpec{
+		{Name: "az3", StartAt: &t3},
+		{Name: "az2", StartAt: &t2},
+	}
+
+	readyPool := func(name, group string) []client.Object {
+		np := regressionNP(name, group)
+		_ = unstructured.SetNestedField(np.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+		_ = unstructured.SetNestedField(np.Object, "4.21.0", "status", "version")
+		_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
+			"ocpVersion": "4.21.0", "readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
+		}}, "status", "nodesInfo", "nodeVersions")
+		return []client.Object{np, readyWorkerFixture(np, hcu.Spec.TargetReleaseImage)}
+	}
+
+	poolAZ2 := readyPool("pool-az2", "")
+	poolAZ3 := readyPool("pool-az3", "")
+	hcu.Status.NodePoolStatuses = []upgradev1alpha1.NodePoolUpgradeStatus{
+		{Name: "pool-az2", Group: "default", Phase: "Completed", TargetReleaseImage: hcu.Spec.TargetReleaseImage},
+		{Name: "pool-az3", Group: "default", Phase: "Completed", TargetReleaseImage: hcu.Spec.TargetReleaseImage},
+	}
+
+	c := &regressionClient{objects: append(append([]client.Object{hcu, regressionHC("4.21.0")}, poolAZ2...), poolAZ3...)}
+	addReadyCP(c, regressionHC("4.21.0"))
+
+	// 1. Add group labels to existing unlabeled NodePools while HCU is Completed.
+	poolAZ2[0].SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "az2"})
+	poolAZ3[0].SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "az3"})
+	got := reconcileRegression(t, c)
+	if c.writes != 0 {
+		t.Fatalf("live reorganization mutated downstream objects: writes=%d", c.writes)
+	}
+	if got.Status.Phase != upgradev1alpha1.PhaseCompleted {
+		t.Fatalf("phase = %s, want Completed (%s)", got.Status.Phase, got.Status.Message)
+	}
+	if len(got.Status.NodePoolStatuses) != 2 ||
+		got.Status.NodePoolStatuses[0].Name != "pool-az3" || got.Status.NodePoolStatuses[0].Group != "az3" || !got.Status.NodePoolStatuses[0].ScheduledStart.Equal(&t3) ||
+		got.Status.NodePoolStatuses[1].Name != "pool-az2" || got.Status.NodePoolStatuses[1].Group != "az2" || !got.Status.NodePoolStatuses[1].ScheduledStart.Equal(&t2) {
+		t.Fatalf("NodePoolStatuses not reorganized by spec.nodePoolGroups priority: %+v", got.Status.NodePoolStatuses)
+	}
+	if got.Status.AggregatedNodeStatus.Total != 2 || got.Status.AggregatedNodeStatus.Updated != 2 || got.Status.AggregatedNodeStatus.Ready != 2 {
+		t.Fatalf("unexpected aggregated counts: %+v", got.Status.AggregatedNodeStatus)
+	}
+
+	// 2. Unknown group label blocks without silently omitting the pool, then recovers to Completed when fixed.
+	poolAZ2[0].SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "unknown-group"})
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseBlocked || got.Status.PhaseBeforeBlock != upgradev1alpha1.PhaseCompleted {
+		t.Fatalf("unknown group did not block with Completed recovery phase: %+v", got.Status)
+	}
+	if len(got.Status.NodePoolStatuses) != 2 || got.Status.NodePoolStatuses[1].Name != "pool-az2" || got.Status.NodePoolStatuses[1].Group != "unknown-group" {
+		t.Fatalf("unknown-group pool omitted or not updated: %+v", got.Status.NodePoolStatuses)
+	}
+	poolAZ2[0].SetLabels(map[string]string{"upgrade.huc.0xshift.dev/group": "az2"})
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseCompleted || got.Status.PhaseBeforeBlock != "" {
+		t.Fatalf("fixing group label did not recover Completed state: %+v", got.Status)
+	}
+
+	// 3. Reorganization also works while Paused (observe-only) without actuation.
+	paused := "true"
+	got.Spec.PausedUntil = &paused
+	if err := c.store(got); err != nil {
+		t.Fatal(err)
+	}
+	poolAZ3[0].SetLabels(nil)
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhasePaused || c.writes != 0 {
+		t.Fatalf("paused reorganization failed or actuated: phase=%s writes=%d", got.Status.Phase, c.writes)
+	}
+	if got.Status.NodePoolStatuses[0].Name != "pool-az2" || got.Status.NodePoolStatuses[0].Group != "az2" ||
+		got.Status.NodePoolStatuses[1].Name != "pool-az3" || got.Status.NodePoolStatuses[1].Group != "default" || got.Status.NodePoolStatuses[1].ScheduledStart != nil {
+		t.Fatalf("paused reorganization order/group wrong: %+v", got.Status.NodePoolStatuses)
+	}
+
+	// 4. Newly created already-at-target NodePool is enrolled into Completed status under its group.
+	got.Spec.PausedUntil = nil
+	if err := c.store(got); err != nil {
+		t.Fatal(err)
+	}
+	c.objects = append(c.objects, readyPool("pool-extra", "az3")...)
+	got = reconcileRegression(t, c)
+	if got.Status.Phase != upgradev1alpha1.PhaseCompleted || len(got.Status.NodePoolStatuses) != 3 ||
+		got.Status.NodePoolStatuses[0].Name != "pool-extra" || got.Status.NodePoolStatuses[0].Group != "az3" {
+		t.Fatalf("completed cluster did not enroll new target-aligned pool in group order: %+v", got.Status.NodePoolStatuses)
+	}
+}
