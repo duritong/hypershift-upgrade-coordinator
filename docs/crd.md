@@ -40,9 +40,14 @@ This document details all configuration fields inside the `HostedClusterUpgrade`
 
 The coordinator maintains standard Kubernetes conditions in `status.conditions`:
 
+- **`Ready`:** `True` when the upgrade has reached `Completed`.
+- **`Progressing`:** `True` while an upgrade is actively rolling out or waiting on a schedule/convergence gate.
+- **`Failing`:** `True` when `status.phase` is `Blocked`.
 - **`GuestAccessMaintenanceReady`:** Indicates whether guest observer credentials and RBAC are maintained and ready for rotation.
 - **`GuestCredentialAvailable`:** Reflects whether a valid, unexpired observer bearer token is delivered and usable.
 - **`GuestAssessmentReady`:** Reports whether the latest scoped guest health assessment passed for the active upgrade purpose.
+
+For state-transition diagrams and a complete table mapping `status.phase` and `status.message` patterns to green-path recovery actions, see [State Machine, Status Messages & Recovery Paths](user-guide.md#7-state-machine-status-messages--recovery-paths).
 
 ---
 

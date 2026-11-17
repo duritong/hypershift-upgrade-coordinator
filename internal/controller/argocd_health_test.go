@@ -135,6 +135,12 @@ var allSampleExpectations = []sampleExpectation{
 		wantArgoMessage: "Deleting HostedClusterUpgrade: restoring coordinator-owned NodePool pause locks (upgrade.huc.0xshift.dev/worker-locks)",
 		wantDeletionMsg: "Deleting HostedClusterUpgrade: restoring coordinator-owned NodePool pause locks (upgrade.huc.0xshift.dev/worker-locks)",
 	},
+	{
+		file:            "15_verifying_eus_intermediate_rollout.yaml",
+		wantPhase:       upgradev1alpha1.PhaseVerifyingControlPlane,
+		wantArgoStatus:  "Progressing",
+		wantArgoMessage: "Waiting for Control Plane components to complete rollout to 4.21.42 (20/33 ready).",
+	},
 }
 
 func extractGitOpsHealthLua(t *testing.T) string {

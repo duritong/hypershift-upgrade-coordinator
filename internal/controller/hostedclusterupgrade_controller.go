@@ -507,7 +507,17 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		hcu.Status.Message = "Beginning Preflight Checks."
 
 	case upgradev1alpha1.PhasePreflightChecks:
-		isInstalling, err := r.checkClusterInstallingAndHealth(uHC)
+		baseline, _ := GetHostedClusterCurrentRelease(uHC)
+		requested, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
+		inFlightTarget := samePayload(requested, hcu.Spec.TargetReleaseImage) && !samePayload(baseline, requested)
+
+		var isInstalling bool
+		var err error
+		if inFlightTarget {
+			isInstalling, err = r.checkControlPlaneRolloutHealth(uHC)
+		} else {
+			isInstalling, err = r.checkClusterInstallingAndHealth(uHC)
+		}
 		if err != nil {
 			reqLogger.Error(err, "PreflightChecks failed")
 			markUpgradeBlocked(hcu)
@@ -524,7 +534,6 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 
 		// Adopt compatible already-target control planes without demanding a
 		// historical source baseline or relocking delegated worker rollouts.
-		requested, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(requested, hcu.Spec.TargetReleaseImage) {
 			if err := r.verifyControlPlane(ctx, hcu, uHC, hcu.Spec.TargetReleaseImage); err != nil {
 				hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
@@ -545,7 +554,6 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 
 		// Ensure all NodePools are locked before progressing past preflight
-		baseline, _ := GetHostedClusterCurrentRelease(uHC)
 		desired, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(baseline, desired) {
 			if err := r.validateControlPlaneWorkerSkew(ctx, hcu, uHC); err != nil {
@@ -627,15 +635,7 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		hcu.Status.Message = "Control Plane schedule open. Ready to initiate rollout."
 
 	case upgradev1alpha1.PhaseUpgradingControlPlane:
-		// Pre-Step Health Re-verification check
-		isInstalling, err := r.checkClusterInstallingAndHealth(uHC)
-		if err != nil {
-			markUpgradeBlocked(hcu)
-			hcu.Status.Message = fmt.Sprintf("Pre-Step Health Gate Blocked CP Upgrade: %v", err)
-			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "PreStepCPHealthBlocked").Inc()
-			break
-		}
-		if isInstalling {
+		if !hasCompletedVersionHistory(uHC) {
 			hcu.Status.Phase = upgradev1alpha1.PhaseInstalling
 			hcu.Status.Message = "HostedCluster is currently in initial installation. Waiting for completion."
 			break
@@ -655,12 +655,26 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		previousImage, _, _ := unstructured.NestedString(uHC.Object, "spec", "release", "image")
 		if samePayload(previousImage, nextReleaseImage) {
+			if _, rolloutErr := r.checkControlPlaneRolloutHealth(uHC); rolloutErr != nil {
+				markUpgradeBlocked(hcu)
+				hcu.Status.Message = fmt.Sprintf("Control Plane Rollout Blocked: %v", rolloutErr)
+				metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, "ControlPlaneRolloutFailed").Inc()
+				break
+			}
+			hcu.Status.ControlPlaneStatus.Step = stepLabel
 			hcu.Status.ControlPlaneStatus.TargetReleaseImage = nextReleaseImage
 			hcu.Status.Phase = upgradev1alpha1.PhaseVerifyingControlPlane
 			hcu.Status.Message = "Adopting current HostedCluster release request. Verifying exact payload completion."
 			break
 		}
 
+		// Pre-Step Health Re-verification check before initiating a new release hop
+		if _, err := r.checkClusterInstallingAndHealth(uHC); err != nil {
+			markUpgradeBlocked(hcu)
+			hcu.Status.Message = fmt.Sprintf("Pre-Step Health Gate Blocked CP Upgrade: %v", err)
+			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", "", "PreStepCPHealthBlocked").Inc()
+			break
+		}
 		// Apply the version change on the HostedCluster spec!
 		if start := hcu.Spec.ControlPlane.StartAt; start != nil && r.now().Before(start.Time) {
 			hcu.Status.Phase = upgradev1alpha1.PhasePendingSchedule
@@ -754,12 +768,16 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			reqLogger.Error(err, "Failed to aggregate ControlPlaneComponent status")
 		}
 
-		// Re-verify cluster health
+		// Observe guest progress and check only hard configuration/release blockers.
+		// Transient UnavailableReplicas (Degraded=True), etcd/KAS pod restarts
+		// (Available=False), and CVO mid-rollout transitions are expected while
+		// ControlPlaneComponents are rolling out; full steady-state health is
+		// enforced in verifyControlPlane before completing the hop.
 		r.observeGuest(ctx, hcu, uHC)
-		isInstalling, healthErr := r.checkClusterInstallingAndHealth(uHC)
-		if healthErr != nil {
+		isInstalling, rolloutErr := r.checkControlPlaneRolloutHealth(uHC)
+		if rolloutErr != nil {
 			markUpgradeBlocked(hcu)
-			hcu.Status.Message = fmt.Sprintf("Control Plane Rollout Blocked: %v", healthErr)
+			hcu.Status.Message = fmt.Sprintf("Control Plane Rollout Blocked: %v", rolloutErr)
 			metricFailedTotal.WithLabelValues(hcu.Namespace, hcu.Name, "", expectedVer, "ControlPlaneRolloutFailed").Inc()
 			break
 		}
@@ -769,19 +787,18 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			break
 		}
 
-		if err := r.verifyControlPlane(ctx, hcu, uHC, expectedRelease); err != nil {
-			hcu.Status.Message = err.Error()
-			stateRequeueAfter = 10 * time.Second
-			break
-		}
-
-		// 2. Check ControlPlaneComponent readiness on expectedVer
+		// 2. Check ControlPlaneComponent readiness on expectedVer before steady-state completion proof
 		if hcu.Status.ControlPlaneStatus.TotalComponents == 0 || hcu.Status.ControlPlaneStatus.UpgradedComponents < hcu.Status.ControlPlaneStatus.TotalComponents {
 			hcu.Status.Message = fmt.Sprintf("Waiting for Control Plane components to complete rollout to %s (%d/%d ready).", expectedVer, hcu.Status.ControlPlaneStatus.UpgradedComponents, hcu.Status.ControlPlaneStatus.TotalComponents)
 			stateRequeueAfter = 10 * time.Second
 			break
 		}
 
+		if err := r.verifyControlPlane(ctx, hcu, uHC, expectedRelease); err != nil {
+			hcu.Status.Message = err.Error()
+			stateRequeueAfter = 10 * time.Second
+			break
+		}
 		// Control plane rollout to expectedVer is 100% verified!
 		purpose := guest.WorkerEntry
 		if expectedVer != targetVer {
@@ -1958,25 +1975,74 @@ func GetNodePoolNodeCounts(np *unstructured.Unstructured, targetReleaseImage str
 	return int32(totalReplicas), updatedSum, readySum
 }
 
-// checkClusterInstallingAndHealth checks if the cluster is currently installing or contains failing/degraded conditions.
-func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *unstructured.Unstructured) (bool, error) {
+func hasCompletedVersionHistory(uHC *unstructured.Unstructured) bool {
 	history, foundHist, _ := unstructured.NestedSlice(uHC.Object, "status", "version", "history")
-	hasCompleted := false
-	if foundHist && len(history) > 0 {
-		for _, item := range history {
-			hMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			state, _ := hMap["state"].(string)
-			if state == "Completed" {
-				hasCompleted = true
-				break
-			}
+	if !foundHist {
+		return false
+	}
+	for _, item := range history {
+		hMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if state, _ := hMap["state"].(string); state == "Completed" {
+			return true
 		}
 	}
-	if !hasCompleted {
-		return true, nil // No completed versions yet, meaning we are still in installation
+	return false
+}
+
+// checkControlPlaneRolloutHealth checks whether the cluster is still in initial
+// installation or has a non-transient configuration/release/pause condition that
+// prevents an in-flight control plane rollout from progressing. Transient
+// UnavailableReplicas (Degraded=True) and component restarts (Available=False)
+// are normal during control plane rollouts and are verified at completion instead.
+func (r *HostedClusterUpgradeReconciler) checkControlPlaneRolloutHealth(uHC *unstructured.Unstructured) (bool, error) {
+	if !hasCompletedVersionHistory(uHC) {
+		return true, nil
+	}
+	conds, foundConds, _ := unstructured.NestedSlice(uHC.Object, "status", "conditions")
+	if !foundConds {
+		return false, nil
+	}
+	for _, c := range conds {
+		condMap, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cType, _ := condMap["type"].(string)
+		cStatus, _ := condMap["status"].(string)
+		cMsg, _ := condMap["message"].(string)
+		if cStatus != "False" {
+			continue
+		}
+		switch cType {
+		case "ValidHostedControlPlaneConfiguration":
+			return false, fmt.Errorf("HostedCluster has invalid control plane configuration: %s", cMsg)
+		case "ValidConfiguration":
+			return false, fmt.Errorf("HostedCluster has invalid configuration: %s", cMsg)
+		case "SupportedHostedCluster":
+			return false, fmt.Errorf("HostedCluster configuration is unsupported: %s", cMsg)
+		case "ValidReleaseImage":
+			return false, fmt.Errorf("HostedCluster release image is invalid: %s", cMsg)
+		case "ValidReleaseInfo":
+			return false, fmt.Errorf("HostedCluster release payload info is invalid: %s", cMsg)
+		case "IgnitionServerValidReleaseInfo":
+			return false, fmt.Errorf("HostedCluster ignition server release info is invalid: %s", cMsg)
+		case "ClusterVersionReleaseAccepted":
+			return false, fmt.Errorf("HostedCluster ClusterVersion rejected release payload: %s", cMsg)
+		case "ReconciliationActive":
+			return false, fmt.Errorf("HostedCluster reconciliation is paused or inactive: %s", cMsg)
+		}
+	}
+	return false, nil
+}
+
+// checkClusterInstallingAndHealth checks steady-state positive health required
+// before initiating an upgrade step and before certifying rollout completion.
+func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *unstructured.Unstructured) (bool, error) {
+	if installing, err := r.checkControlPlaneRolloutHealth(uHC); err != nil || installing {
+		return installing, err
 	}
 
 	conds, foundConds, _ := unstructured.NestedSlice(uHC.Object, "status", "conditions")
@@ -2005,9 +2071,6 @@ func (r *HostedClusterUpgradeReconciler) checkClusterInstallingAndHealth(uHC *un
 			}
 			if cType == "Degraded" && cStatus == "True" {
 				return false, fmt.Errorf("HostedCluster contains degraded condition: %s", cMsg)
-			}
-			if cType == "ValidHostedControlPlaneConfiguration" && cStatus == "False" {
-				return false, fmt.Errorf("HostedCluster has invalid control plane configuration: %s", cMsg)
 			}
 		}
 	}

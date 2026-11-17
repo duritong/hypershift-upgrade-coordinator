@@ -1,0 +1,357 @@
+apiVersion: upgrade.0xshift.dev/v1alpha1
+kind: HostedClusterUpgrade
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: '{"apiVersion":"upgrade.0xshift.dev/v1alpha1","kind":"HostedClusterUpgrade","metadata":{"annotations":{},"name":"example-cluster-01","namespace":"clusters"},"spec":{"controlPlane":{},"intermediateReleaseImage":"registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222","nodePoolGroups":[{"name":"infra"},{"name":"compute"}],"rolloutPolicy":{"maxParallelNodePools":1},"targetReleaseImage":"registry.example.com/ocp-release/release:4.22.22-x86_64@sha256:3333333333333333333333333333333333333333333333333333333333333333"}}
+
+      '
+  creationTimestamp: '2026-01-15T08:00:00Z'
+  finalizers:
+  - upgrade.huc.0xshift.dev/worker-locks
+  generation: 2
+  name: example-cluster-01
+  namespace: clusters
+  resourceVersion: '200042'
+  uid: 00000000-0000-4000-8000-000000000001
+spec:
+  controlPlane: {}
+  intermediateReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  nodePoolGroups:
+  - name: infra
+  - name: compute
+  rolloutPolicy:
+    maxParallelNodePools: 1
+  targetReleaseImage: registry.example.com/ocp-release/release:4.22.22-x86_64@sha256:3333333333333333333333333333333333333333333333333333333333333333
+status:
+  aggregatedNodeStatus:
+    ready: 0
+    total: 0
+    updated: 0
+  conditions:
+  - lastTransitionTime: '2026-01-15T09:47:05Z'
+    message: Observer credential maintenance outcome
+    observedGeneration: 2
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestAccessMaintenanceReady
+  - lastTransitionTime: '2026-01-15T09:47:05Z'
+    message: Credential presence and expiration only; not proof of observer authentication
+    observedGeneration: 2
+    reason: CredentialCurrent
+    status: 'True'
+    type: GuestCredentialAvailable
+  - lastTransitionTime: '2026-01-17T08:38:21Z'
+    message: Waiting for Control Plane components to complete rollout to 4.21.42 (20/33 ready).
+    observedGeneration: 2
+    reason: VerifyingControlPlane
+    status: 'False'
+    type: Ready
+  - lastTransitionTime: '2026-01-17T08:38:21Z'
+    message: Waiting for Control Plane components to complete rollout to 4.21.42 (20/33 ready).
+    observedGeneration: 2
+    reason: UpgradeProgressing
+    status: 'True'
+    type: Progressing
+  - lastTransitionTime: '2026-01-17T08:38:21Z'
+    message: Waiting for Control Plane components to complete rollout to 4.21.42 (20/33 ready).
+    observedGeneration: 2
+    reason: VerifyingControlPlane
+    status: 'False'
+    type: Failing
+  - lastTransitionTime: '2026-01-17T08:38:21Z'
+    message: 'ObserveControlPlane: Converging'
+    observedGeneration: 2
+    reason: CVDesiredReleaseMismatch
+    status: 'False'
+    type: GuestAssessmentReady
+  controlPlaneStatus:
+    blockers:
+    - 'Component ''cluster-image-registry-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-image-registry-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''cluster-network-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-network-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''cluster-node-tuning-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-node-tuning-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''cluster-policy-controller'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-policy-controller rollout to finish: 2 out of 2 new replicas have been updated'
+    - 'Component ''cluster-storage-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-storage-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''cluster-version-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      cluster-version-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''csi-snapshot-controller-operator'' is not ready: RolloutIncomplete: Waiting for deployment
+      csi-snapshot-controller-operator rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''dns-operator'' is not ready: RolloutIncomplete: Waiting for deployment dns-operator
+      rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''ingress-operator'' is not ready: RolloutIncomplete: Waiting for deployment ingress-operator
+      rollout to finish: 1 out of 1 new replicas have been updated'
+    - 'Component ''oauth-openshift'' is not ready: RolloutIncomplete: Waiting for deployment oauth-openshift
+      rollout to finish: 3 out of 3 new replicas have been updated'
+    - 'Component ''openshift-controller-manager'' is not ready: RolloutIncomplete: Waiting for deployment
+      openshift-controller-manager rollout to finish: 2 out of 2 new replicas have been updated'
+    - 'Component ''openshift-oauth-apiserver'' is not ready: RolloutIncomplete: Waiting for Dependencies:
+      openshift-apiserver'
+    - 'Component ''openshift-route-controller-manager'' is not ready: RolloutIncomplete: Waiting for deployment
+      openshift-route-controller-manager rollout to finish: 2 out of 2 new replicas have been updated'
+    components:
+    - available: true
+      name: capi-provider
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: catalog-operator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: cluster-api
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: cluster-autoscaler
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-image-registry-operator rollout to finish:
+        1 out of 1 new replicas have been updated'
+      name: cluster-image-registry-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-network-operator rollout to finish:
+        1 out of 1 new replicas have been updated'
+      name: cluster-network-operator
+      rolloutComplete: false
+      version: ''
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-node-tuning-operator rollout to finish:
+        1 out of 1 new replicas have been updated'
+      name: cluster-node-tuning-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-policy-controller rollout to finish:
+        2 out of 2 new replicas have been updated'
+      name: cluster-policy-controller
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-storage-operator rollout to finish:
+        1 out of 1 new replicas have been updated'
+      name: cluster-storage-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment cluster-version-operator rollout to finish:
+        1 out of 1 new replicas have been updated'
+      name: cluster-version-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      name: control-plane-operator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: control-plane-pki-operator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment csi-snapshot-controller-operator rollout to
+        finish: 1 out of 1 new replicas have been updated'
+      name: csi-snapshot-controller-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment dns-operator rollout to finish: 1 out of 1 new
+        replicas have been updated'
+      name: dns-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      name: etcd
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: featuregate-generator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: hosted-cluster-config-operator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: ignition-server
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: ignition-server-proxy
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment ingress-operator rollout to finish: 1 out of
+        1 new replicas have been updated'
+      name: ingress-operator
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      name: konnectivity-agent
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: kube-apiserver
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: kube-controller-manager
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: kube-scheduler
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: machine-approver
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment oauth-openshift rollout to finish: 3 out of
+        3 new replicas have been updated'
+      name: oauth-openshift
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      name: olm-collect-profiles
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: olm-operator
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      name: openshift-apiserver
+      rolloutComplete: true
+      version: 4.21.42
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment openshift-controller-manager rollout to finish:
+        2 out of 2 new replicas have been updated'
+      name: openshift-controller-manager
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for Dependencies: openshift-apiserver'
+      name: openshift-oauth-apiserver
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      message: 'RolloutIncomplete: Waiting for deployment openshift-route-controller-manager rollout to
+        finish: 2 out of 2 new replicas have been updated'
+      name: openshift-route-controller-manager
+      rolloutComplete: false
+      version: 4.20.44
+    - available: true
+      name: packageserver
+      rolloutComplete: true
+      version: 4.21.42
+    startTime: '2026-01-17T08:38:21Z'
+    step: Intermediate
+    targetReleaseImage: registry.example.com/ocp-release/release:4.21.42-x86_64@sha256:2222222222222222222222222222222222222222222222222222222222222222
+    totalComponents: 33
+    upgradedComponents: 20
+  guestAccess:
+    clusterID: 00000000-0000-4000-8000-000000000002
+    clusterVersionUID: 00000000-0000-4000-8000-000000000003
+    credentialAvailable: true
+    endpointRevision: '2222222222222222222222222222222222222222222222222222222222222222'
+    expiresAt: '2026-01-17T09:42:29Z'
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    maintenanceReady: true
+    observedGeneration: 2
+    observerUsability: Unknown
+    profileRevision: observer-v2
+    reason: CredentialCurrent
+    secretName: guest-observer-00000000-0000-4000-8000-000000000004
+  guestAssessment:
+    blockerCount: 14
+    blockers:
+    - reason: CVDesiredReleaseMismatch
+    - reason: CVLatestNotCompleted
+    - operator: console
+      reason: OperatorVersionMismatch
+    - operator: csi-snapshot-controller
+      reason: OperatorVersionMismatch
+    - operator: dns
+      reason: OperatorVersionMismatch
+    - operator: image-registry
+      reason: OperatorVersionMismatch
+    - operator: ingress
+      reason: OperatorVersionMismatch
+    - operator: insights
+      reason: OperatorVersionMismatch
+    - operator: kube-storage-version-migrator
+      reason: OperatorVersionMismatch
+    - operator: monitoring
+      reason: OperatorVersionMismatch
+    - operator: network
+      reason: OperatorVersionMismatch
+    - operator: node-tuning
+      reason: OperatorVersionMismatch
+    - operator: service-ca
+      reason: OperatorVersionMismatch
+    - operator: storage
+      reason: OperatorVersionMismatch
+    expectedVersion: 4.21.42
+    hostedClusterUID: 00000000-0000-4000-8000-000000000004
+    lastAttemptTime: '2026-01-17T08:42:29Z'
+    lastSuccessfulObservation: '2026-01-17T08:42:29Z'
+    observedGeneration: 2
+    operators:
+    - name: console
+      version: 4.20.44
+    - name: csi-snapshot-controller
+      version: 4.20.44
+    - name: dns
+      version: 4.20.44
+    - name: image-registry
+      version: 4.20.44
+    - name: ingress
+      version: 4.20.44
+    - name: insights
+      version: 4.20.44
+    - name: kube-apiserver
+      version: 4.21.42
+    - name: kube-controller-manager
+      version: 4.21.42
+    - name: kube-scheduler
+      version: 4.21.42
+    - name: kube-storage-version-migrator
+      version: 4.20.44
+    - name: monitoring
+      version: 4.20.44
+    - name: network
+      version: 4.20.44
+    - name: node-tuning
+      version: 4.20.44
+    - name: openshift-apiserver
+      version: 4.21.42
+    - name: openshift-controller-manager
+      version: 4.21.42
+    - name: operator-lifecycle-manager
+      version: 4.21.42
+    - name: operator-lifecycle-manager-catalog
+      version: 4.21.42
+    - name: operator-lifecycle-manager-packageserver
+      version: 4.21.42
+    - name: service-ca
+      version: 4.20.44
+    - name: storage
+      version: 4.20.44
+    planRevision: '3333333333333333333333333333333333333333333333333333333333333333'
+    purpose: ObserveControlPlane
+    reason: CVDesiredReleaseMismatch
+    secretRevision: '200040'
+    secretUID: 00000000-0000-4000-8000-000000000005
+    state: Converging
+    truncated: false
+  initialVersion: 4.20.44
+  message: Waiting for Control Plane components to complete rollout to 4.21.42 (20/33 ready).
+  observedGeneration: 2
+  phase: VerifyingControlPlane
+  startTime: '2026-01-17T08:38:20Z'

@@ -359,3 +359,169 @@ func TestUpstreamCNOBugNotToleratedOnAWSPlatform(t *testing.T) {
 		t.Fatalf("CNO bug must NOT be tolerated on AWS cloud platform; got phase: %s", got.Status.Phase)
 	}
 }
+
+func TestControlPlaneRolloutToleratesTransientComponentRestarts(t *testing.T) {
+	intermediateImg := regressionImage("4.21.49")
+	targetImg := regressionImage("4.22.22")
+	started := metav1.NewTime(time.Now().Add(-4 * time.Minute))
+
+	for _, scenario := range []struct {
+		name       string
+		conditions []interface{}
+	}{
+		{
+			name: "UnavailableReplicas Degraded during deployment rollout",
+			conditions: []interface{}{
+				map[string]interface{}{"type": "Available", "status": "True"},
+				map[string]interface{}{"type": "ClusterVersionAvailable", "status": "True"},
+				map[string]interface{}{"type": "ClusterVersionSucceeding", "status": "True"},
+				map[string]interface{}{"type": "Degraded", "status": "True", "reason": "UnavailableReplicas", "message": "openshift-apiserver deployment has 1 unavailable replicas"},
+			},
+		},
+		{
+			name: "Etcd and KubeAPIServer restarting with Available False",
+			conditions: []interface{}{
+				map[string]interface{}{"type": "Available", "status": "False", "reason": "WaitingForAvailable", "message": "Waiting for Kube APIServer deployment to become available"},
+				map[string]interface{}{"type": "EtcdAvailable", "status": "False", "reason": "EtcdQuorumUnavailable"},
+				map[string]interface{}{"type": "KubeAPIServerAvailable", "status": "False", "reason": "WaitingForAvailable"},
+				map[string]interface{}{"type": "ClusterVersionAvailable", "status": "Unknown", "message": "Condition not found in the CVO."},
+				map[string]interface{}{"type": "ClusterVersionSucceeding", "status": "Unknown", "message": "Condition not found in the CVO."},
+				map[string]interface{}{"type": "Degraded", "status": "True", "reason": "UnavailableReplicas", "message": "kube-apiserver deployment has 1 unavailable replicas"},
+			},
+		},
+		{
+			name: "CVO mid-upgrade transient ClusterVersionFailing",
+			conditions: []interface{}{
+				map[string]interface{}{"type": "Available", "status": "True"},
+				map[string]interface{}{"type": "ClusterVersionAvailable", "status": "True"},
+				map[string]interface{}{"type": "ClusterVersionSucceeding", "status": "False"},
+				map[string]interface{}{"type": "ClusterVersionFailing", "status": "True", "message": "ClusterOperator authentication is not available"},
+			},
+		},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			// Simulate an HCU that was previously stuck in Blocked (PhaseBeforeBlock=VerifyingControlPlane)
+			// to prove existing upgrades self-recover immediately on deployment.
+			hcu := regressionHCU(upgradev1alpha1.PhaseBlocked)
+			hcu.Status.PhaseBeforeBlock = upgradev1alpha1.PhaseVerifyingControlPlane
+			hcu.Spec.IntermediateReleaseImage = intermediateImg
+			hcu.Spec.TargetReleaseImage = targetImg
+			hcu.Status.StartTime = &started
+			hcu.Status.ControlPlaneStatus.Step = "Intermediate"
+			hcu.Status.ControlPlaneStatus.StartTime = &started
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = intermediateImg
+
+			hc := regressionHC("4.20.24")
+			_ = unstructured.SetNestedField(hc.Object, intermediateImg, "spec", "release", "image")
+			_ = unstructured.SetNestedSlice(hc.Object, scenario.conditions, "status", "conditions")
+
+			hcp := readyHCP(hc)
+			etcdCPC := readyStepCPC("4.21.49")
+			etcdCPC.SetName("etcd")
+			etcdCPC.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+
+			oasCPC := readyStepCPC("4.20.24")
+			oasCPC.SetName("openshift-apiserver")
+			oasCPC.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+			_ = unstructured.SetNestedSlice(oasCPC.Object, []interface{}{
+				map[string]interface{}{"type": "Available", "status": "True"},
+				map[string]interface{}{"type": "RolloutComplete", "status": "False", "message": "Waiting for deployment openshift-apiserver rollout to finish"},
+			}, "status", "conditions")
+
+			c := &regressionClient{objects: []client.Object{hcu, hc, hcp, etcdCPC, oasCPC}}
+			r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, hcu, nil)}
+
+			got := reconcileReleaseTest(t, r, c, hcu)
+			if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+				t.Fatalf("expected VerifyingControlPlane during component restart, got %s (%s)", got.Status.Phase, got.Status.Message)
+			}
+			if got.Status.PhaseBeforeBlock != "" {
+				t.Fatalf("expected PhaseBeforeBlock to clear, got %q", got.Status.PhaseBeforeBlock)
+			}
+			if !got.Status.ControlPlaneStatus.StartTime.Equal(&started) {
+				t.Fatalf("control plane timer changed during rollout: %v", got.Status.ControlPlaneStatus.StartTime)
+			}
+			wantMsg := "Waiting for Control Plane components to complete rollout to 4.21.49 (1/2 ready)."
+			if got.Status.Message != wantMsg {
+				t.Fatalf("message = %q, want %q", got.Status.Message, wantMsg)
+			}
+			if c.writes != 0 {
+				t.Fatalf("unexpected downstream writes during verification: %d", c.writes)
+			}
+
+			// Even once all CPCs and histories report 4.21.49 Completed, step completion MUST still
+			// hold in VerifyingControlPlane until transient Degraded/Unavailable conditions clear.
+			oasReady := readyStepCPC("4.21.49")
+			oasReady.SetName("openshift-apiserver")
+			oasReady.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+			_ = c.store(oasReady)
+			for _, field := range []string{"version", "controlPlaneVersion"} {
+				_ = unstructured.SetNestedSlice(hc.Object, []interface{}{
+					map[string]interface{}{"state": "Completed", "version": "4.21.49", "image": intermediateImg},
+				}, "status", field, "history")
+				_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{"version": "4.21.49", "image": intermediateImg}, "status", field, "desired")
+			}
+			_ = c.store(hc)
+
+			got = reconcileReleaseTest(t, r, c, got)
+			if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+				t.Fatalf("unhealthy cluster advanced past intermediate verification: phase=%s msg=%s", got.Status.Phase, got.Status.Message)
+			}
+		})
+	}
+}
+
+func TestControlPlaneRolloutAdoptsInFlightRequestDuringRestarts(t *testing.T) {
+	for _, phase := range []upgradev1alpha1.UpgradePhase{upgradev1alpha1.PhasePreflightChecks, upgradev1alpha1.PhaseUpgradingControlPlane} {
+		t.Run(string(phase), func(t *testing.T) {
+			hcu := regressionHCU(phase)
+			hcu.Spec.TargetReleaseImage = regressionImage("4.21.49")
+			hc := regressionHC("4.20.24")
+			_ = unstructured.SetNestedField(hc.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+			_ = unstructured.SetNestedSlice(hc.Object, []interface{}{
+				map[string]interface{}{"type": "Available", "status": "False", "reason": "WaitingForAvailable"},
+				map[string]interface{}{"type": "Degraded", "status": "True", "reason": "UnavailableReplicas", "message": "etcd statefulset rolling out"},
+			}, "status", "conditions")
+
+			c := &regressionClient{objects: []client.Object{hcu, hc, readyHCP(hc)}}
+			r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}, GuestAccess: legacyGuest(c, hcu, nil)}
+
+			got := reconcileReleaseTest(t, r, c, hcu)
+			if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane || c.writes != 0 {
+				t.Fatalf("failed to adopt in-flight CP rollout during component restarts: phase=%s msg=%s writes=%d", got.Status.Phase, got.Status.Message, c.writes)
+			}
+		})
+	}
+}
+
+func TestControlPlaneRolloutHardRejectionConditionsBlock(t *testing.T) {
+	for _, condType := range []string{
+		"ValidHostedControlPlaneConfiguration",
+		"ValidConfiguration",
+		"SupportedHostedCluster",
+		"ValidReleaseImage",
+		"ValidReleaseInfo",
+		"IgnitionServerValidReleaseInfo",
+		"ClusterVersionReleaseAccepted",
+		"ReconciliationActive",
+	} {
+		t.Run(condType, func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhaseVerifyingControlPlane)
+			hcu.Spec.TargetReleaseImage = regressionImage("4.21.49")
+			hcu.Status.ControlPlaneStatus.TargetReleaseImage = hcu.Spec.TargetReleaseImage
+
+			hc := regressionHC("4.20.24")
+			_ = unstructured.SetNestedField(hc.Object, hcu.Spec.TargetReleaseImage, "spec", "release", "image")
+			_ = unstructured.SetNestedSlice(hc.Object, []interface{}{
+				map[string]interface{}{"type": condType, "status": "False", "message": "explicit rejection"},
+			}, "status", "conditions")
+
+			c := &regressionClient{objects: []client.Object{hcu, hc}}
+			r := &HostedClusterUpgradeReconciler{Client: c, APIReader: c, ReleaseResolver: fixtureReleaseResolver{}}
+			got := reconcileReleaseTest(t, r, c, hcu)
+			if got.Status.Phase != upgradev1alpha1.PhaseBlocked {
+				t.Fatalf("%s=False must block VerifyingControlPlane, got %s (%s)", condType, got.Status.Phase, got.Status.Message)
+			}
+		})
+	}
+}

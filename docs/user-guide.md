@@ -137,31 +137,121 @@ To schedule a subsequent upgrade in the future, simply update `targetReleaseImag
 
 ---
 
-## 7. Safety Gates & Upgrade Progression
+## 7. State Machine, Status Messages & Recovery Paths
 
-HUC drives upgrades through a deterministic state machine with strict safety gates:
+### A. Top-Level `status.phase` State Machine
 
+Every `HostedClusterUpgrade` progresses along the green path (`Idle` $\to$ `Completed`). Two interrupt states (`Paused` and `Blocked`) preserve the exact interrupted step in `status.phaseBeforePause` and `status.phaseBeforeBlock`, resuming that step directly without restarting already-running or completed rollouts:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: Create CR / Day-2 targetReleaseImage bump
+
+    Idle --> PreflightChecks: Initialize
+    PreflightChecks --> Installing: No Completed history yet
+    Installing --> PreflightChecks: Initial install Completed
+
+    PreflightChecks --> VerifyingControlPlane: Adopt in-flight target CP rollout
+    PreflightChecks --> UpgradingNodePools: Adopt verified target CP (Day-1 bootstrap)
+    PreflightChecks --> PendingSchedule: Baseline healthy + skew OK + NodePools locked
+
+    PendingSchedule --> PendingSchedule: Before controlPlane.startAt
+    PendingSchedule --> UpgradingControlPlane: Schedule open (or omitted)
+
+    UpgradingControlPlane --> VerifyingControlPlane: Patch HC spec.release.image (Intermediate or Target)
+    VerifyingControlPlane --> VerifyingControlPlane: CPCs rolling / CVO converging / transient restarts
+    VerifyingControlPlane --> UpgradingControlPlane: Intermediate hop verified -> start Target hop
+    VerifyingControlPlane --> UpgradingNodePools: Target CP + Guest operators verified
+
+    UpgradingNodePools --> UpgradingNodePools: Sequential group rollouts & drain monitoring
+    UpgradingNodePools --> Completed: All NodePools + final CP & Guest gates verified
+    Completed --> Idle: spec.targetReleaseImage updated in Git
+
+    state "Paused (ArgoCD: Suspended)" as Paused
+    state "Blocked (ArgoCD: Degraded)" as Blocked
+
+    PreflightChecks --> Paused: spec.pausedUntil active
+    PendingSchedule --> Paused: spec.pausedUntil active
+    UpgradingControlPlane --> Paused: spec.pausedUntil active
+    VerifyingControlPlane --> Paused: spec.pausedUntil active
+    UpgradingNodePools --> Paused: spec.pausedUntil active
+    Paused --> retry_pause: pausedUntil cleared or expired
+    state retry_pause <<choice>>
+    retry_pause --> PreflightChecks: via phaseBeforePause
+    retry_pause --> PendingSchedule: via phaseBeforePause
+    retry_pause --> UpgradingControlPlane: via phaseBeforePause
+    retry_pause --> VerifyingControlPlane: via phaseBeforePause
+    retry_pause --> UpgradingNodePools: via phaseBeforePause
+
+    PreflightChecks --> Blocked: Safety / skew / payload / health gate failed
+    UpgradingControlPlane --> Blocked: Pre-step health / skew / conflicting payload
+    VerifyingControlPlane --> Blocked: Hard config/payload rejection or HC paused
+    UpgradingNodePools --> Blocked: Unknown group label or unrecoverable API error
+    Blocked --> retry_block: Every 30s or watch event (retryBlockedStep)
+    state retry_block <<choice>>
+    retry_block --> PreflightChecks: via phaseBeforeBlock
+    retry_block --> UpgradingControlPlane: via phaseBeforeBlock
+    retry_block --> VerifyingControlPlane: via phaseBeforeBlock
+    retry_block --> UpgradingNodePools: via phaseBeforeBlock
 ```
-[Day 0: Apply CR]
-       │
-       ▼
-[PreflightChecks] ─────► Verifies cluster health, version progression, and worker skew (n-3)
-       │
-       ▼
-[PendingSchedule] ─────► Waits until controlPlane.startAt opens
-       │
-       ▼
-[UpgradingControlPlane] ─► Upgrades CP (intermediate release first if EUS path configured)
-       │
-       ▼
-[VerifyingControlPlane] ─► Verifies 100% of CPCs and guest operators are Available & RolloutComplete
-       │
-       ▼
-[UpgradingNodePools] ────► Sequential group rollouts, respecting schedules and maxParallelNodePools
-       │
-       ▼
-[Completed] ────────────► Final verification of all components and NodePools
+
+### B. Sub-Step Verification & Worker Group Pipeline
+
+Inside `VerifyingControlPlane` and `UpgradingNodePools`, HUC evaluates layered management and guest gates before advancing:
+
+```mermaid
+flowchart TD
+    subgraph CP["VerifyingControlPlane (ArgoCD: Progressing)"]
+        CP1{"Hard HC rejection? (ValidRelease*=False, ReconciliationActive=False)"}
+        CP2{"All CPCs ready at expected version? (Upgraded == Total)"}
+        CP3{"HC version & controlPlaneVersion Completed + Available=True & Degraded=False?"}
+        CP4{"Scoped Guest Gate Ready? (ClusterVersion + all COs + OpenShift Virt)"}
+        CP_NEXT["Next CP hop or UpgradingNodePools"]
+        CP_BLK["Phase: Blocked (ArgoCD: Degraded)"]
+
+        CP1 -- "Yes" --> CP_BLK
+        CP1 -- "No (transient restarts tolerated)" --> CP2
+        CP2 -- "No (N/M ready)" --> CP2
+        CP2 -- "Yes (M/M ready)" --> CP3
+        CP3 -- "No (CVO / pods settling)" --> CP3
+        CP3 -- "Yes" --> CP4
+        CP4 -- "Converging / Unhealthy" --> CP4
+        CP4 -- "Ready" --> CP_NEXT
+    end
+
+    subgraph NP["UpgradingNodePools — Per-NodePool Status Lifecycle"]
+        NP_WAIT_GRP["WaitingForGroup (Earlier group running)"]
+        NP_SCHED["Scheduled (Before group startAt)"]
+        NP_CONC["WaitingForConcurrency (maxParallelNodePools full)"]
+        NP_BLK["Pool Blocked (User pause / external rollout / CP or Guest gate)"]
+        NP_UPG["Upgrading (Unpaused + target image; CAPI/MCO + HCCO drain watch)"]
+        NP_DONE["Pool Completed (Target version + fresh CAPI/InPlace proof)"]
+
+        NP_WAIT_GRP --> NP_SCHED --> NP_CONC --> NP_UPG --> NP_DONE
+        NP_CONC -. "Gate or user pause" .-> NP_BLK
+        NP_BLK -. "Condition cleared" .-> NP_CONC
+    end
 ```
+
+### C. Status Message & Green-Path Runbook
+
+| `status.phase` (Argo CD) | Typical `status.message` / Sub-State | What It Means | Expected / Required Action for Green Path |
+| :--- | :--- | :--- | :--- |
+| `Installing` (`Progressing`) | `HostedCluster is currently in initial installation...` | `HostedCluster.status.version.history` has no `Completed` entry yet. | **No action (wait).** Advances automatically to `PreflightChecks` once initial cluster install finishes. |
+| `PreflightChecks` (`Progressing`) | `Preflight CP prerequisite: ...` or `guest SourceBaseline: Converging ...` or `requires ClusterVersionUpgradeable=True` | Cluster is healthy enough to avoid a hard block, but CVO/operators are still settling or `Upgradeable=False` is set. | **Wait** if operators are converging. If `ClusterVersionUpgradeable=False` persists, inspect guest `ClusterVersion` admin-acks / operator upgradeability blockers. |
+| `PendingSchedule` (`Progressing`) | `Control Plane upgrade is scheduled to start at <RFC3339> (in ...)` | All preflight gates passed and worker NodePools are locked; waiting for `spec.controlPlane.startAt`. | **No action (wait)** for scheduled window, or clear/advance `spec.controlPlane.startAt` in Git to start immediately. |
+| `UpgradingControlPlane` (`Progressing`) | `Previous CP prerequisite: ...` or `guest BeforeControlPlaneRequest: ...` | Schedule is open; re-verifying baseline CP, worker quiescence, and guest health right before patching `HostedCluster.spec.release.image`. | **No action (wait)** if transient; if guest virtualization reports outdated workloads or non-upgradeable HCO on EUS hop, align operator channel/CatalogSource. |
+| `VerifyingControlPlane` (`Progressing`) | `Waiting for Control Plane components to complete rollout to <ver> (X/Y ready).` | HyperShift is rolling out control-plane pods (`etcd`, `kube-apiserver`, `openshift-apiserver`, etc.). Transient `UnavailableReplicas` (`Degraded=True`) or brief API restarts are normal here. | **No action (wait).** Inspect `status.controlPlaneStatus.blockers` only if `X/Y` stops advancing for >30–45m. |
+| `VerifyingControlPlane` (`Progressing`) | `waiting for latest version Completed history...` or `HostedCluster contains degraded condition...` or `guest IntermediateVerification / WorkerEntry: ...` | All CPCs reached `<ver>`, and guest CVO / in-tree `ClusterOperators` / OpenShift Virtualization are finishing operand convergence. | **No action (wait)** during normal CVO rollout. In EUS upgrades with OpenShift Virtualization, ensure the guest operator CatalogSource/Subscription is updated for the target minor so HCO becomes `Upgradeable` and healthy. |
+| `UpgradingNodePools` (`Progressing`) | Pool `Scheduled` / `WaitingForGroup` / `WaitingForConcurrency` / `Upgrading` | Sequential worker rollout active. Pools wait for prior groups, group `startAt`, or `maxParallelNodePools` slots. | **No action (wait).** If a pool stays in `Upgrading` with `status.drainDiagnostics.messages`, inspect guest PDBs or non-migratable VMs blocking eviction. |
+| `UpgradingNodePools` (`Progressing`) | Pool `Blocked`: `Paused by user...` / `Externally started or unproven worker rollout...` / `guest WorkerGuard: Unhealthy...` | That specific pool cannot be actuated yet (overall HCU remains `UpgradingNodePools` while other active pools finish). | Clear external `NodePool.spec.pausedUntil` if unintended, wait for external config rollout to quiesce, or resolve the degraded guest `ClusterOperator` / outdated VMI workloads shown in `status.guestAssessment.blockers`. |
+| `Paused` (`Suspended`) | `Upgrade coordinator is paused via spec.pausedUntil.` | HUC is in observe-only mode (metrics, CPCs, and group labels still refresh; no downstream spec mutations occur; already-running HyperShift rollouts continue). | Wait for RFC3339 `spec.pausedUntil` expiry, or remove/set `spec.pausedUntil: "false"` in Git to resume `status.phaseBeforePause`. |
+| `Blocked` (`Degraded`) | `Release payload safety gate blocked: ...` | Pull-secret, mirror (`ImageDigestMirrorSet`/`ICSP`), CA bundle (`additionalTrustBundle`), digest, or CPU architecture check failed. | Verify mirror sync for target/intermediate digest, `HostedCluster.spec.pullSecret` credentials, and `additionalTrustBundle` CA cert. HUC auto-retries every 30s. |
+| `Blocked` (`Degraded`) | `Upgrade plan safety gate blocked: NodePool "..." references unknown group "..."` | A `NodePool` has an `upgrade.huc.0xshift.dev/group` label not listed in `spec.nodePoolGroups`. | Add the group to `spec.nodePoolGroups` or fix the `NodePool` label; HUC auto-recovers immediately via `NodePool` / HCU watch. |
+| `Blocked` (`Degraded`) | `NodePool "..." worker <ver> violates same-major n-3 skew...` or `Upgrade version safety gate blocked...` | Planned release path violates monotonic semver, 1-minor hop limit, or HyperShift `n-3` worker skew, or `spec.controlPlaneRelease` override is set. | Fix `targetReleaseImage` / `intermediateReleaseImage` in Git or upgrade lagging NodePools first; remove unsupported `HostedCluster.spec.controlPlaneRelease`. |
+| `Blocked` (`Degraded`) | `Preflight Checks Blocked: ...` / `Pre-Step Health Gate Blocked CP Upgrade: ...` | Cluster had `Degraded=True`, `ClusterVersionFailing=True`, or `Available=False` **before** a new upgrade step was initiated. | Fix the pre-existing `HostedCluster` / guest `ClusterOperator` health issue first. Once healthy, HUC automatically resumes `status.phaseBeforeBlock`. |
+| `Blocked` (`Degraded`) | `Control Plane Rollout Blocked: HostedCluster ...` (`ValidRelease*=False`, `ClusterVersionReleaseAccepted=False`, `ReconciliationActive=False`) | HyperShift or CVO explicitly rejected the release image/configuration, or `HostedCluster.spec.pausedUntil` paused HyperShift mid-rollout. | Unpause `HostedCluster.spec.pausedUntil` or point `HostedClusterUpgrade` to a valid release image. |
+| `Completed` (`Healthy`) | `All upgrade steps successfully verified and completed.` | Control plane, guest `ClusterOperators`, OpenShift Virtualization, and all `NodePool`s are verified on `spec.targetReleaseImage`. | **Green steady state.** Keep CR in Git; bump `spec.targetReleaseImage` (and optional `intermediateReleaseImage`) to start the next upgrade cycle. |
 
 ### Safety Features
 - **Strict 1-Minor Jumps:** Validating webhooks reject any single step exceeding 1 minor version jump.

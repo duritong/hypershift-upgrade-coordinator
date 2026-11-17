@@ -216,7 +216,7 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Con
 	if err := upgradev1alpha1.RejectControlPlaneReleaseOverride(hc); err != nil {
 		return proof, err
 	}
-	if installing, err := r.checkClusterInstallingAndHealth(hc); err != nil {
+	if installing, err := r.checkControlPlaneRolloutHealth(hc); err != nil {
 		return proof, err
 	} else if installing {
 		return proof, fmt.Errorf("HostedCluster installation is not complete")
@@ -248,6 +248,9 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Con
 		if requested, _, _ := unstructured.NestedString(hc.Object, "status", field, "desired", "image"); requested != "" && !samePayload(requested, image) {
 			return proof, fmt.Errorf("%s desired payload conflicts with expected release", field)
 		}
+	}
+	if _, err := r.checkClusterInstallingAndHealth(hc); err != nil {
+		return proof, err
 	}
 	hcp := &unstructured.Unstructured{}
 	hcp.SetGroupVersionKind(gvkHCP)
