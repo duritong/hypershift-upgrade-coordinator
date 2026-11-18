@@ -265,22 +265,23 @@ flowchart TD
 ## 8. Monitoring & Troubleshooting
 
 ### Tracking Upgrade Progress
-Check status and human-readable messages via CLI:
+Check status, node counts, and the `NODE-BLOCKERS` overview column via CLI:
 ```bash
 oc get hostedclusterupgrade production-cluster-01 -n clusters
 ```
+`NODE-BLOCKERS` summarizes whether worker pools or node drains are currently blocked (e.g. `None`, `1 node drain blocked (force in 18m)`, `1/2 pools blocked`, or `Drain eviction failing`).
 
-View detailed component progress, blockers, and guest assessments:
+View detailed component progress, per-pool CAPI `drains`, blockers, and guest assessments:
 ```bash
 oc describe hostedclusterupgrade production-cluster-01 -n clusters
 ```
 
 ### Troubleshooting Blocked Node Drains
-If a worker node drain stalls (e.g. due to PodDisruptionBudgets or non-migratable VMs):
-1. Check `status.drainDiagnostics.messages` for recent eviction errors gathered from HCCO logs.
-2. Check `status.nodePoolStatuses` to see which pool is blocked.
-3. For clusters running OpenShift Virtualization, audit running VMs to ensure they have `evictionStrategy: LiveMigrate` and are not bound to local storage. See [Non-Migratable VMs](virtualization-assessment.md#non-migratable-vms-and-nodepool-drain-blockers).
-
+If a worker node drain stalls (e.g. due to `PodDisruptionBudget`s or non-migratable VMs):
+1. **Quick CLI Overview:** `oc get hostedclusterupgrade <name> -n <ns>` surfaces blocked CAPI drains, blocked pools, or HCCO eviction failures directly in `NODE-BLOCKERS` and `STATUS-MESSAGE`.
+2. **`Replace` Pools (`status.nodePoolStatuses[].drains`):** HUC inspects deleting CAPI `Machine` conditions (`DrainingSucceeded`, `PreDrainDeleteHookSucceeded`, `VolumeDetachSucceeded`), `nodeDrainStartTime`, and `NodePool.spec.nodeDrainTimeout` / `nodeVolumeDetachTimeout`, reporting the exact blocking pods/PDBs and `forceDrainAt` countdown per NodePool.
+3. **`InPlace` Pools (`status.drainDiagnostics.messages`):** Upstream HyperShift `InPlace` upgrades drain via HCCO rather than CAPI `Machine` deletion (and upstream HCCO does not enforce `NodePool.spec.nodeDrainTimeout`); HUC surfaces active eviction failures from HCCO logs in `status.drainDiagnostics.messages` and `NODE-BLOCKERS`.
+4. **OpenShift Virtualization:** Audit running VMs to ensure they have `evictionStrategy: LiveMigrate` and are not bound to local storage. See [Non-Migratable VMs](virtualization-assessment.md#non-migratable-vms-and-nodepool-drain-blockers).
 ### Observability & Dashboards
 - **Grafana Dashboard:** Import [`docs/monitoring/grafana-dashboard.json`](monitoring/grafana-dashboard.json) to monitor fleet upgrades, phase progressions, and drain hints in real time.
 - **Prometheus Alerts:** Pre-packaged alert rules notify SREs if an upgrade is blocked, credentials fail to rotate, or a node drain exceeds SLA thresholds. See [Monitoring & Alerting](monitoring.md).

@@ -219,6 +219,10 @@ func init() {
 		metricNodePoolBlocked,
 		metricNodePoolRolloutRatio,
 		metricAggregatedNodeRolloutRatio,
+		metricNodePoolDrainingMachines,
+		metricNodePoolDrainBlockedMachines,
+		metricNodePoolDrainDuration,
+		metricNodePoolForceDrainRemaining,
 	)
 }
 
@@ -233,7 +237,7 @@ func init() {
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups=config.openshift.io,resources=imagedigestmirrorsets,verbs=get;list;watch
 //+kubebuilder:rbac:groups=operator.openshift.io,resources=imagecontentsourcepolicies,verbs=get;list;watch
-//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets,verbs=get;list;watch
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments;machinesets;machines,verbs=get;list;watch
 
 // Reconcile is the main state machine loop for HostedClusterUpgrade.
 func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -1031,6 +1035,7 @@ func (r *HostedClusterUpgradeReconciler) lockClusterNodePools(ctx context.Contex
 // clearUpgradeGauges leaves historical failure counters intact.
 func clearUpgradeGauges(namespace, name string) {
 	clearGuestMetrics(namespace, name)
+	clearMachineDrainMetrics(namespace, name)
 	labels := prometheus.Labels{"namespace": namespace, "name": name}
 	for _, gauge := range []*prometheus.GaugeVec{
 		metricPhase, metricDuration, metricStepDuration, metricComponentReady,
@@ -1134,10 +1139,12 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 							status.Phase = "Completed"
 							status.StartTime = nil
 							status.Blockers = nil
+							status.Drains = nil
 							metricNodePoolBlocked.WithLabelValues(hcu.Namespace, hcu.Name, np.GetName(), currentVer, targetVer).Set(0)
 						}
 					} else if hcu.Status.Phase == upgradev1alpha1.PhaseCompleted && assessmentErr == nil {
 						status.Nodes = upgradev1alpha1.NodeStatusSummary{Total: replicas, Updated: upgraded, Ready: readyNodes}
+						status.Drains = nil
 					}
 				}
 				if !foundStatus && hcu.Status.Phase == upgradev1alpha1.PhaseCompleted && assessmentErr == nil && assessment.complete {
@@ -1193,12 +1200,34 @@ func (r *HostedClusterUpgradeReconciler) exposePhaseMetrics(ctx context.Context,
 			})
 		}
 		hcu.Status.NodePoolStatuses = statuses
+		if hcu.Status.Phase == upgradev1alpha1.PhasePaused {
+			machineDrains := r.collectClusterMachineDrains(ctx, hcu)
+			var drainingSum, drainBlockedSum int32
+			for i := range hcu.Status.NodePoolStatuses {
+				status := &hcu.Status.NodePoolStatuses[i]
+				if status.Phase == "Completed" {
+					status.Drains = nil
+					continue
+				}
+				status.Drains = machineDrains[status.Name]
+				d, b := drainCounts(status.Drains)
+				status.Nodes.Draining = d
+				status.Nodes.DrainBlocked = b
+				drainingSum += d
+				drainBlockedSum += b
+			}
+			hcu.Status.AggregatedNodeStatus.Draining = drainingSum
+			hcu.Status.AggregatedNodeStatus.DrainBlocked = drainBlockedSum
+		}
 	}
 
 	var intermediateVer string
 	if hcu.Spec.IntermediateReleaseImage != "" {
 		intermediateVer, _ = upgradev1alpha1.ExtractVersion(hcu.Spec.IntermediateReleaseImage)
 	}
+	now := r.now()
+	hcu.Status.NodeBlockersSummary = computeNodeBlockersSummary(hcu, now)
+	exposeMachineDrainMetrics(hcu, now)
 
 	metricPhase.WithLabelValues(hcu.Namespace, hcu.Name, currentVer, targetVer, intermediateVer).Set(phaseVal)
 
@@ -1725,7 +1754,29 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 	hcu.Status.NodePoolStatuses = hcuStatuses
 	// Diagnostics are best-effort and run only after rollout actions, once per cluster.
 	r.refreshDrainDiagnostics(ctx, hcu)
-
+	machineDrainsByPool := r.collectClusterMachineDrains(ctx, hcu)
+	now := r.now()
+	var drainingSum, drainBlockedSum int32
+	for i := range hcu.Status.NodePoolStatuses {
+		pool := &hcu.Status.NodePoolStatuses[i]
+		if pool.Phase == "Completed" {
+			continue
+		}
+		pool.Drains = machineDrainsByPool[pool.Name]
+		dCount, bCount := drainCounts(pool.Drains)
+		pool.Nodes.Draining = dCount
+		pool.Nodes.DrainBlocked = bCount
+		drainingSum += dCount
+		drainBlockedSum += bCount
+		for _, d := range pool.Drains {
+			if d.Blocked {
+				pool.Blockers = append(pool.Blockers, formatMachineDrainBlocker(d, now))
+			}
+		}
+	}
+	hcu.Status.AggregatedNodeStatus.Draining = drainingSum
+	hcu.Status.AggregatedNodeStatus.DrainBlocked = drainBlockedSum
+	hcu.Status.NodeBlockersSummary = computeNodeBlockersSummary(hcu, now)
 	if allCompleted {
 		if err := r.verifyControlPlane(ctx, hcu, uHC, targetReleaseImage); err != nil {
 			hcu.Status.Message = err.Error()
@@ -1737,6 +1788,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		}
 		// All groups successfully verified and upgraded! Transition state machine to Completed.
 		hcu.Status.Phase = upgradev1alpha1.PhaseCompleted
+		hcu.Status.NodeBlockersSummary = "None"
 		hcu.Status.Message = "All worker NodePools successfully upgraded and verified on target version."
 		return false, 0, nil
 	}
@@ -1750,10 +1802,7 @@ func (r *HostedClusterUpgradeReconciler) reconcileNodePools(ctx context.Context,
 		return true, shortestRequeue, nil
 	}
 
-	hcu.Status.Message = "Worker NodePool upgrades actively rolling out."
-	if pauseBlocked {
-		hcu.Status.Message = "Worker NodePool upgrades blocked by independent pauses or lock ownership; see NodePool blockers."
-	}
+	hcu.Status.Message = summarizeActiveWorkerMessage(hcu, pauseBlocked, now)
 	if groupUpgradeTriggered {
 		return true, time.Second * 5, nil // Requeue quickly to observe the unpause
 	}
@@ -1818,12 +1867,19 @@ func (r *HostedClusterUpgradeReconciler) setupWithManager(mgr ctrl.Manager, name
 	uMD.SetGroupVersionKind(gvkMachineDeployment)
 	uMS := &unstructured.Unstructured{}
 	uMS.SetGroupVersionKind(gvkMachineSet)
+	uMachine := &unstructured.Unstructured{}
+	uMachine.SetGroupVersionKind(gvkMachine)
 
 	return ctrl.NewControllerManagedBy(mgr).Named(name).
 		For(&upgradev1alpha1.HostedClusterUpgrade{}, builder.WithPredicates(upgradeEventPredicate)).
 		Watches(uHCP, handler.EnqueueRequestsFromMapFunc(r.mapCPCToHostedClusterUpgrade)).
 		Watches(uMD, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
 		Watches(uMS, handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade)).
+		Watches(
+			uMachine,
+			handler.EnqueueRequestsFromMapFunc(r.mapWorkerToHostedClusterUpgrade),
+			builder.WithPredicates(machineDrainPredicate),
+		).
 		Watches(
 			uCPC,
 			handler.EnqueueRequestsFromMapFunc(r.mapCPCToHostedClusterUpgrade),

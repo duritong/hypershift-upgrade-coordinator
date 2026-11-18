@@ -24,6 +24,7 @@ rules:
   - cluster.x-k8s.io
   resources:
   - machinedeployments
+  - machines
   - machinesets
   verbs:
   - get

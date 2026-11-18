@@ -63,6 +63,14 @@ spec:
       annotations:
         summary: "Hosted Cluster Upgrade NodePool is Blocked"
         description: "The NodePool '{{ $labels.nodepool }}' in HostedClusterUpgrade '{{ $labels.name }}' reports an assessment or orchestration blocker. Inspect NodePool status; this is not attribution of HCCO drain logs."
+    - alert: HypershiftUpgradeNodeDrainBlocked
+      expr: hypershift_upgrade_nodepool_drain_blocked_machines > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "CAPI Machine node drain is blocked"
+        description: "NodePool '{{ $labels.nodepool }}' in HostedClusterUpgrade '{{ $labels.namespace }}/{{ $labels.name }}' has {{ $value }} CAPI Machine(s) blocked during node drain (e.g. PodDisruptionBudget or pre-drain hook). Inspect status.nodePoolStatuses[].drains for blocking pods and any configured force-drain cutoff."
     - alert: HypershiftUpgradeDrainObservations
       expr: hypershift_upgrade_drain_observations > 0
       for: 10m

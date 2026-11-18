@@ -20,7 +20,7 @@ func TestObservedInfrastructureRBACIsReadOnly(t *testing.T) {
 	}
 	for _, rule := range role.Rules {
 		for _, resource := range rule.Resources {
-			if resource != "controlplanecomponents" && resource != "hostedcontrolplanes" && resource != "machinedeployments" && resource != "machinesets" {
+			if resource != "controlplanecomponents" && resource != "hostedcontrolplanes" && resource != "machinedeployments" && resource != "machinesets" && resource != "machines" {
 				continue
 			}
 			for _, verb := range rule.Verbs {

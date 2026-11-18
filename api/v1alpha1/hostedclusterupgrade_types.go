@@ -162,6 +162,13 @@ type HostedClusterUpgradeStatus struct {
 	// AggregatedNodeStatus summarizes overall node upgrades progress across all associated NodePools.
 	// +optional
 	AggregatedNodeStatus NodeStatusSummary `json:"aggregatedNodeStatus,omitempty"`
+
+	// NodeBlockersSummary provides a concise cluster-level overview of blocked
+	// worker NodePools or node drains for CLI table output (e.g. "None",
+	// "1 node drain blocked (force in 18m)", "1/2 pools blocked").
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	NodeBlockersSummary string `json:"nodeBlockersSummary,omitempty"`
 }
 
 type UpgradePhase string
@@ -347,6 +354,11 @@ type NodePoolUpgradeStatus struct {
 
 	// Blockers lists authoritative NodePool assessment and orchestration blockers.
 	Blockers []string `json:"blockers,omitempty"`
+
+	// Drains lists active CAPI Machine node drain or volume-detach states for this NodePool.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Drains []NodeDrainStatus `json:"drains,omitempty"`
 }
 
 type NodeStatusSummary struct {
@@ -356,6 +368,43 @@ type NodeStatusSummary struct {
 	Updated int32 `json:"updated"`
 	// Ready is the number of nodes that are running and healthy.
 	Ready int32 `json:"ready"`
+	// Draining is the number of CAPI Machines currently draining or waiting for volume detach.
+	// +optional
+	Draining int32 `json:"draining,omitempty"`
+	// DrainBlocked is the number of CAPI Machines reporting a blocked or failed node drain.
+	// +optional
+	DrainBlocked int32 `json:"drainBlocked,omitempty"`
+}
+
+type NodeDrainStatus struct {
+	// Machine is the CAPI Machine name in the control-plane namespace.
+	// +kubebuilder:validation:MaxLength=253
+	Machine string `json:"machine"`
+	// Node is the guest Node name from Machine.status.nodeRef.name when known.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Node string `json:"node,omitempty"`
+	// Phase is the active CAPI Machine deletion stage.
+	// +kubebuilder:validation:Enum=PreDrainHook;Draining;VolumeDetach
+	Phase string `json:"phase"`
+	// Blocked indicates whether CAPI reports a failed pod eviction (e.g. PodDisruptionBudget),
+	// drain error, or external pre-drain lifecycle hook hold.
+	Blocked bool `json:"blocked"`
+	// StartedAt is when CAPI started the active drain or volume-detach stage.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// Timeout is the configured NodeDrainTimeout or NodeVolumeDetachTimeout when greater than zero.
+	// Omitted when zero (infinite retry without forced cutoff).
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+	// ForceDrainAt is the computed cutoff timestamp (StartedAt + Timeout) after which CAPI skips
+	// remaining drain/volume-detach waits and deletes the Machine.
+	// +optional
+	ForceDrainAt *metav1.Time `json:"forceDrainAt,omitempty"`
+	// Message is CAPI's bounded condition detail (e.g. blocking Pod and PodDisruptionBudget names).
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -363,6 +412,7 @@ type NodeStatusSummary struct {
 //+kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the upgrade state machine"
 //+kubebuilder:printcolumn:name="Nodes-Updated",type="integer",JSONPath=".status.aggregatedNodeStatus.updated",description="Total worker nodes updated"
 //+kubebuilder:printcolumn:name="Nodes-Total",type="integer",JSONPath=".status.aggregatedNodeStatus.total",description="Total worker nodes in cluster"
+//+kubebuilder:printcolumn:name="Node-Blockers",type="string",JSONPath=".status.nodeBlockersSummary",description="Overview of blocked worker pools or node drains"
 //+kubebuilder:printcolumn:name="Target-Image",type="string",JSONPath=".spec.targetReleaseImage",description="Target OpenShift release image"
 //+kubebuilder:printcolumn:name="Status-Message",type="string",JSONPath=".status.message",description="Current status message"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

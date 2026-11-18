@@ -27,6 +27,10 @@ spec:
       jsonPath: .status.aggregatedNodeStatus.total
       name: Nodes-Total
       type: integer
+    - description: Overview of blocked worker pools or node drains
+      jsonPath: .status.nodeBlockersSummary
+      name: Node-Blockers
+      type: string
     - description: Target OpenShift release image
       jsonPath: .spec.targetReleaseImage
       name: Target-Image
@@ -154,6 +158,16 @@ spec:
                 description: AggregatedNodeStatus summarizes overall node upgrades
                   progress across all associated NodePools.
                 properties:
+                  drainBlocked:
+                    description: DrainBlocked is the number of CAPI Machines reporting
+                      a blocked or failed node drain.
+                    format: int32
+                    type: integer
+                  draining:
+                    description: Draining is the number of CAPI Machines currently
+                      draining or waiting for volume detach.
+                    format: int32
+                    type: integer
                   ready:
                     description: Ready is the number of nodes that are running and
                       healthy.
@@ -495,6 +509,13 @@ spec:
                   Message describes the current step, pending schedules, or active blocker details.
                   e.g. "Control Plane upgrade verified. NodePool 'infra-pool' is waiting for its scheduled window (opens in 14 hours)."
                 type: string
+              nodeBlockersSummary:
+                description: |-
+                  NodeBlockersSummary provides a concise cluster-level overview of blocked
+                  worker NodePools or node drains for CLI table output (e.g. "None",
+                  "1 node drain blocked (force in 18m)", "1/2 pools blocked").
+                maxLength: 128
+                type: string
               nodePoolStatuses:
                 description: NodePoolStatus details the progress of each associated
                   NodePool.
@@ -505,6 +526,62 @@ spec:
                         and orchestration blockers.
                       items:
                         type: string
+                      type: array
+                    drains:
+                      description: Drains lists active CAPI Machine node drain or
+                        volume-detach states for this NodePool.
+                      items:
+                        properties:
+                          blocked:
+                            description: |-
+                              Blocked indicates whether CAPI reports a failed pod eviction (e.g. PodDisruptionBudget),
+                              drain error, or external pre-drain lifecycle hook hold.
+                            type: boolean
+                          forceDrainAt:
+                            description: |-
+                              ForceDrainAt is the computed cutoff timestamp (StartedAt + Timeout) after which CAPI skips
+                              remaining drain/volume-detach waits and deletes the Machine.
+                            format: date-time
+                            type: string
+                          machine:
+                            description: Machine is the CAPI Machine name in the control-plane
+                              namespace.
+                            maxLength: 253
+                            type: string
+                          message:
+                            description: Message is CAPI's bounded condition detail
+                              (e.g. blocking Pod and PodDisruptionBudget names).
+                            maxLength: 1024
+                            type: string
+                          node:
+                            description: Node is the guest Node name from Machine.status.nodeRef.name
+                              when known.
+                            maxLength: 253
+                            type: string
+                          phase:
+                            description: Phase is the active CAPI Machine deletion
+                              stage.
+                            enum:
+                            - PreDrainHook
+                            - Draining
+                            - VolumeDetach
+                            type: string
+                          startedAt:
+                            description: StartedAt is when CAPI started the active
+                              drain or volume-detach stage.
+                            format: date-time
+                            type: string
+                          timeout:
+                            description: |-
+                              Timeout is the configured NodeDrainTimeout or NodeVolumeDetachTimeout when greater than zero.
+                              Omitted when zero (infinite retry without forced cutoff).
+                            type: string
+                        required:
+                        - blocked
+                        - machine
+                        - phase
+                        type: object
+                      maxItems: 32
                       type: array
                     group:
                       description: Group specifies the logical rollout group this
@@ -517,6 +594,16 @@ spec:
                       description: Nodes contains node-level metrics for the NodePool
                         rollout.
                       properties:
+                        drainBlocked:
+                          description: DrainBlocked is the number of CAPI Machines
+                            reporting a blocked or failed node drain.
+                          format: int32
+                          type: integer
+                        draining:
+                          description: Draining is the number of CAPI Machines currently
+                            draining or waiting for volume detach.
+                          format: int32
+                          type: integer
                         ready:
                           description: Ready is the number of nodes that are running
                             and healthy.

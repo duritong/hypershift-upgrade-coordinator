@@ -26,7 +26,7 @@ func TestControlPlaneEventRouting(t *testing.T) {
 		want = append(want, reconcile.Request{NamespacedName: key})
 	}
 	for _, scope := range []string{"", "team-prod", "other"} {
-		for _, gvk := range []schema.GroupVersionKind{gvkCPC, gvkHCP, gvkMachineDeployment, gvkMachineSet} {
+		for _, gvk := range []schema.GroupVersionKind{gvkCPC, gvkHCP, gvkMachineDeployment, gvkMachineSet, gvkMachine} {
 			r := &HostedClusterUpgradeReconciler{Client: &regressionClient{objects: upgrades}, HostedClusterNamespace: scope}
 			obj := &unstructured.Unstructured{}
 			obj.SetGroupVersionKind(gvk)
@@ -39,7 +39,7 @@ func TestControlPlaneEventRouting(t *testing.T) {
 				expected = []reconcile.Request{}
 			}
 			mapper := r.mapCPCToHostedClusterUpgrade
-			if gvk == gvkMachineDeployment || gvk == gvkMachineSet {
+			if gvk == gvkMachineDeployment || gvk == gvkMachineSet || gvk == gvkMachine {
 				mapper = r.mapWorkerToHostedClusterUpgrade
 			}
 			if got := mapper(context.Background(), obj); !reflect.DeepEqual(got, expected) {

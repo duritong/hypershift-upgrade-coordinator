@@ -49,3 +49,12 @@ To ensure platform stability, HUC verifies that worker nodes are **quiescent** b
 - **Priority Ordering:** NodePools are organized into logical rollout groups using the label `upgrade.huc.0xshift.dev/group`.
 - **Group Sequence:** Groups roll out in the sequence specified in `spec.nodePoolGroups[]`. The `"default"` group is automatically appended to the end for any unlabeled pools.
 - **Concurrency Control:** Within an active group, HUC upgrades NodePools in parallel up to the limit set by `spec.rolloutPolicy.maxParallelNodePools` (defaulting to 1). Subsequent groups wait until the active group completes verification.
+
+---
+
+## 5. Read-Only Node Drain & Force-Drain Timeout Telemetry
+
+HUC observes worker node drains read-only without mutating `NodePool.spec.nodeDrainTimeout` or deleting guest pods:
+
+- **`Replace` Strategy (CAPI `Machine` Drains):** When HyperShift retires old `Machine` instances, HUC reads `Machine` deletion conditions (`PreDrainDeleteHookSucceeded`, `DrainingSucceeded`, `VolumeDetachSucceeded`), `status.deletion.nodeDrainStartTime` / `waitForNodeVolumeDetachStartTime`, and `spec.nodeDrainTimeout` / `spec.nodeVolumeDetachTimeout`. Active drains are reported per pool in `status.nodePoolStatuses[].drains` and counted in `nodes.draining` / `nodes.drainBlocked`. When a positive timeout is configured on the `NodePool`, HUC computes `forceDrainAt` and exports remaining seconds via `hypershift_upgrade_nodepool_force_drain_remaining_seconds`.
+- **`InPlace` Strategy (HCCO Drainer Logs):** Because `InPlace` upgrades do not delete CAPI `Machine`s (and upstream HyperShift's HCCO drainer retries indefinitely without reading `nodeDrainTimeout`), HUC complements CAPI inspection with bounded HCCO drain log collection (`status.drainDiagnostics`), surfacing unresolved eviction failures in `status.nodeBlockersSummary` (`NODE-BLOCKERS` column in `oc get hostedclusterupgrade`).

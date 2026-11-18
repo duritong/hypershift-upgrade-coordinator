@@ -25,10 +25,11 @@ This document details all configuration fields inside the `HostedClusterUpgrade`
 | **`message`** | `string` | Human-readable explanation of current activity, schedule countdowns, or active blockers. |
 | **`startTime`** | `string` | RFC3339 timestamp when the upgrade process actively started (transitioned past `Idle`). |
 | **`completionTime`** | `string` | RFC3339 timestamp when the entire upgrade process completed. |
-| **`aggregatedNodeStatus`** | `object` | Summary of total, updated, and ready worker nodes summed across all NodePools (e.g. `{"total": 12, "updated": 4, "ready": 10}`). |
+| **`aggregatedNodeStatus`** | `object` | Summary of `total`, `updated`, `ready`, `draining`, and `drainBlocked` worker nodes summed across all NodePools (e.g. `{"total": 12, "updated": 4, "ready": 10, "draining": 1, "drainBlocked": 1}`). |
+| **`nodeBlockersSummary`** | `string` | Concise cluster-level overview printed in `oc get hostedclusterupgrade` (`NODE-BLOCKERS` column), summarizing blocked CAPI drains (with `nodeDrainTimeout` cutoff countdowns), blocked NodePools, or HCCO drain eviction failures (`"None"` when clear). |
 | **`controlPlaneStatus`** | `object` | Detailed control plane component rollout status: active target image, total components, upgraded components, and component-specific blockers. |
-| **`nodePoolStatuses`** | `array` | Per-NodePool status entries detailing pool phase (`Scheduled`, `Upgrading`, `Completed`, `Blocked`), active version, schedules, and blockers. |
-| **`drainDiagnostics`** | `object` | Best-effort cluster-level drain/eviction hints collected from HCCO logs, including collection availability and recent messages. |
+| **`nodePoolStatuses`** | `array` | Per-NodePool status entries detailing pool phase (`Scheduled`, `Upgrading`, `Completed`, `Blocked`), node counts, active CAPI Machine `drains` (`machine`, `node`, `phase`, `blocked`, `startedAt`, `timeout`, `forceDrainAt`, `message`), schedules, and blockers. |
+| **`drainDiagnostics`** | `object` | Best-effort cluster-level drain/eviction hints collected from HCCO logs (primarily surfacing `InPlace` MCD/HCCO drain blocks), including collection availability and recent messages. |
 | **`guestAccess`** | `object` | Summary of observer credential lifecycle: maintenance readiness, credential availability, expiration timestamp, and delivery secret name. |
 | **`guestAssessment`** | `object` | Result of guest cluster health assessment: verdict state (`Ready`, `Converging`, `Unhealthy`, `Unavailable`, `AccessDenied`), reason, expected version, operator summaries, and active blockers. |
 | **`guestAssessment.virtualization`** | `object` | Dedicated summary of OpenShift Virtualization operator name and version (reported separately from in-tree ClusterOperators). |

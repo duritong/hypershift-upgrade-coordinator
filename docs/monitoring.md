@@ -14,6 +14,7 @@ All alerting configurations are natively managed and deployed via Kustomize. SRE
 | :--- | :--- | :--- | :--- |
 | **HypershiftUpgradeCoordinatorBlocked** | `hypershift_upgrade_phase == 7` | **Critical (Pager)** | The cluster upgrade is currently in a `Blocked` phase. Check preflight health status, failing conditions, or validation errors in the upgrade CR. |
 | **HypershiftUpgradeCoordinatorNodePoolStuck** | `hypershift_upgrade_nodepool_blocked == 1` | **Warning** | A pool reports an assessment or orchestration blocker. Inspect NodePool status; HCCO logs are not attributed to pools. |
+| **HypershiftUpgradeNodeDrainBlocked** | `hypershift_upgrade_nodepool_drain_blocked_machines > 0` | **Warning, 10m** | One or more CAPI `Machine`s in a `Replace` NodePool report a blocked/failed node drain (e.g. `PodDisruptionBudget` or pre-drain hook). Inspect `status.nodePoolStatuses[].drains` for blocking pods and any configured force-drain cutoff (`forceDrainAt`). |
 | **HypershiftUpgradeDrainObservations** | `hypershift_upgrade_drain_observations > 0` | **Warning** | Recent cluster-level drain/eviction hints persist. Inspect `status.drainDiagnostics` and guest resources; exact NodePool/PDB ownership is not established. |
 | **HypershiftUpgradeDrainDiagnosticsUnavailable** | `hypershift_upgrade_drain_diagnostics_available == 0` | **Warning** | Best-effort collection is unavailable, not evidence of healthy drains. Rollout actions continue. |
 | **HypershiftUpgradeStepDurationLong** | `hypershift_upgrade_step_duration_seconds > 14400` | **Warning** | An individual upgrade step (e.g., Control Plane rollout) has been active for more than 4 hours. Inspect underlying component rollout readiness. |
@@ -35,6 +36,8 @@ credential maintenance does not reopen an upgrade or promise ongoing health.
 ## 2. Grafana Dashboard Specification
 
 The two drain gauges use only `namespace` and `name` labels and are separate from the dashboard's per-pool blocker metric. Availability is 1 for successful collection and 0 for unavailable collection; observation count is bounded to ten and resets to zero on unavailable collection. Both series are removed outside active worker reconciliation phases and on deletion. They reflect the most recent worker reconciliation, not a continuous log stream. See the [user guide](user-guide.md#troubleshooting-blocked-node-drains) for bounds, freshness, and attribution limits.
+
+For `Replace` NodePools backed by CAPI `Machine` deletions, HUC also exports per-pool CAPI drain gauges (`namespace`, `name`, `nodepool`): `hypershift_upgrade_nodepool_draining_machines`, `hypershift_upgrade_nodepool_drain_blocked_machines`, `hypershift_upgrade_nodepool_drain_duration_seconds` (omitted when no `Machine` is draining), and `hypershift_upgrade_nodepool_force_drain_remaining_seconds` (omitted when `NodePool.spec.nodeDrainTimeout` / `nodeVolumeDetachTimeout` is `0s`). All four series are removed outside `UpgradingNodePools`/`Paused` and on HCU deletion.
 
 Import [the dashboard JSON](monitoring/grafana-dashboard.json) into Grafana and select a Prometheus datasource scraping the coordinator's `/metrics` endpoint. The dashboard refreshes every **30 seconds**. Instant panels show the latest samples at the selected time range's end; rollout curves show history across that range.
 
