@@ -13,17 +13,37 @@ import (
 
 var gvkHCP = gvkHC.GroupVersion().WithKind("HostedControlPlane")
 
-// Conservatively require explicit approval for patch as well as minor starts.
-// Upgradeable describes the next upgrade, not readiness of the current release.
-func canInitiateControlPlane(hc *unstructured.Unstructured) error {
+// In OpenShift, ClusterVersionUpgradeable gates minor/major version upgrades,
+// never z-stream patch updates within the same minor release.
+func canInitiateControlPlane(hc *unstructured.Unstructured, currentRelease, nextRelease string) error {
+	currMajor, currMinor, currErr := upgradev1alpha1.GetMajorMinor(currentRelease)
+	nextMajor, nextMinor, nextErr := upgradev1alpha1.GetMajorMinor(nextRelease)
+	if currErr == nil && nextErr == nil && currMajor == nextMajor && currMinor == nextMinor {
+		return nil
+	}
+	platform, _, _ := unstructured.NestedString(hc.Object, "spec", "platform", "type")
 	conditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+	var reason, message string
 	for _, item := range conditions {
 		c, _ := item.(map[string]interface{})
-		if c["type"] == "ClusterVersionUpgradeable" && c["status"] == "True" {
+		if c["type"] != "ClusterVersionUpgradeable" {
+			continue
+		}
+		if c["status"] == "True" {
+			return nil
+		}
+		reason, _ = c["reason"].(string)
+		message, _ = c["message"].(string)
+		// TODO(OCPBUGS-130965): Remove once OCP 4.22 backports OCPBUGS-130965 or 4.22 reaches EOL.
+		if c["status"] == "False" && platform != "IBMCloud" && platform != "PowerVS" &&
+			upgradev1alpha1.IsOCP422MigratorDeletesBug(currentRelease, reason, message) {
 			return nil
 		}
 	}
-	return fmt.Errorf("a new control plane release requires ClusterVersionUpgradeable=True")
+	if reason != "" || message != "" {
+		return fmt.Errorf("a minor control plane upgrade requires ClusterVersionUpgradeable=True (%s: %s)", reason, message)
+	}
+	return fmt.Errorf("a minor control plane upgrade requires ClusterVersionUpgradeable=True")
 }
 
 // Workers remain at their actual versions throughout all CP hops. A numerically

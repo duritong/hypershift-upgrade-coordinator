@@ -102,8 +102,12 @@ func Assess(s Snapshot, current Target, policy Policy, now time.Time) Result {
 	} else {
 		check("Progressing", configv1.ConditionFalse, false, true)
 	}
-	if preRequest {
-		check("Upgradeable", configv1.ConditionTrue, true, false)
+	if preRequest && minor {
+		if cc["Upgradeable"] == configv1.ConditionFalse && isCVMigratorDeletesBug(cv.Status.Conditions, current.Expected.Version) {
+			// TODO(OCPBUGS-130965): Tolerate HyperShift 4.22 CVO migrator delete/recreate loop when it is the sole Upgradeable=False reason.
+		} else {
+			check("Upgradeable", configv1.ConditionTrue, true, false)
+		}
 	}
 	if u := cv.Spec.DesiredUpdate; u != nil {
 		if (u.Image == "" && u.Version == "") || (u.Image != "" && !samePayload(u.Image, current.Expected.Image)) || (u.Version != "" && (!fullVersion(u.Version) || u.Version != current.Expected.Version)) {
@@ -191,6 +195,15 @@ func Assess(s Snapshot, current Target, policy Policy, now time.Time) Result {
 		r.State, r.Reason = Converging, "ObservationOnly"
 	}
 	return r
+}
+
+func isCVMigratorDeletesBug(conds []configv1.ClusterOperatorStatusCondition, version string) bool {
+	for _, c := range conds {
+		if string(c.Type) == "Upgradeable" {
+			return c.Status == configv1.ConditionFalse && upgradev1.IsOCP422MigratorDeletesBug(version, c.Reason, c.Message)
+		}
+	}
+	return false
 }
 
 func conditions(in []configv1.ClusterOperatorStatusCondition) (map[string]configv1.ConditionStatus, bool) {

@@ -568,7 +568,11 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 				break
 			}
 			if !samePayload(next, desired) {
-				if err := canInitiateControlPlane(uHC); err != nil {
+				_, currentVer := GetHostedClusterCurrentRelease(uHC)
+				if currentVer == "" {
+					currentVer = baseline
+				}
+				if err := canInitiateControlPlane(uHC, currentVer, next); err != nil {
 					hcu.Status.Message = err.Error()
 					stateRequeueAfter = 10 * time.Second
 					break
@@ -687,12 +691,16 @@ func (r *HostedClusterUpgradeReconciler) Reconcile(ctx context.Context, req ctrl
 			hcu.Status.Message = err.Error()
 			break
 		}
-		if err := canInitiateControlPlane(uHC); err != nil {
+		baseline, _ := GetHostedClusterCurrentRelease(uHC)
+		currentForGate := currentVer
+		if currentForGate == "" {
+			currentForGate = baseline
+		}
+		if err := canInitiateControlPlane(uHC, currentForGate, nextReleaseImage); err != nil {
 			hcu.Status.Message = err.Error()
 			stateRequeueAfter = 10 * time.Second
 			break
 		}
-		baseline, _ := GetHostedClusterCurrentRelease(uHC)
 		if err := r.verifyControlPlane(ctx, hcu, uHC, baseline); err != nil {
 			hcu.Status.Message = fmt.Sprintf("Previous CP prerequisite: %v", err)
 			stateRequeueAfter = 10 * time.Second

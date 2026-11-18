@@ -78,7 +78,7 @@ HUC evaluates guest snapshots at specific lifecycle boundaries:
 | Phase / Purpose | In-Tree ClusterOperators & ClusterVersion | OpenShift Virtualization (if installed) |
 | :--- | :--- | :--- |
 | **`SourceBaseline`** (Preflight) | All COs `Available=True`, `Degraded=False`, `Progressing=False`. Validates upgrade eligibility (`Upgradeable=True`) for minor hops. | HCO healthy (`systemHealthStatus: healthy`), `Upgradeable=True`, not degraded. Outdated workloads must be `0`. EUS paths require workload updates disabled. |
-| **`BeforeControlPlaneRequest`** | All COs healthy, not degraded. Re-verifies `Upgradeable=True` immediately before mutating HostedCluster spec. | HCO healthy, `Upgradeable=True`. EUS paths verify workload updates remain disabled. |
+| **`BeforeControlPlaneRequest`** | All COs healthy, not degraded. Re-verifies `Upgradeable=True` on minor hops immediately before mutating HostedCluster spec. | HCO healthy, `Upgradeable=True`. EUS paths verify workload updates remain disabled. |
 | **`ObserveControlPlane`** | Tracks progress during control plane rollout. | Monitors that HCO does not become degraded during CP rollout. |
 | **`IntermediateVerification`** | Verified at intermediate release: CV completed, all COs matching intermediate release version and Available/not Degraded. | HCO operator version matches intermediate OCP minor release. HCO healthy and `Upgradeable=True`. Workload update methods must remain disabled. |
 | **`WorkerEntry`** | Verified at target release: CV completed, all COs matching target release version. | HCO operator version matches target OCP minor release. Workload update methods must be restored (`LiveMigrate`). Outdated workloads must be `0`. |

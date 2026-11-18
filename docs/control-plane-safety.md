@@ -31,7 +31,7 @@ To prevent worker nodes from becoming unsupported or disconnected during control
 
 Before modifying `HostedCluster.spec.release.image`, HUC verifies that the cluster is healthy and ready to upgrade:
 
-- **Upgradeable Condition:** The control plane must explicitly report `ClusterVersionUpgradeable=True` (or condition status True on guest `ClusterVersion`). If an operator reports `Upgradeable=False`, the upgrade halts to allow SRE investigation.
+- **Upgradeable Condition (Minor Hops Only):** Before initiating a minor control-plane hop (e.g., `4.20` -> `4.21`), the cluster must report `ClusterVersionUpgradeable=True` on `HostedCluster` and `Upgradeable=True` on guest `ClusterVersion` and `ClusterOperators`. Matching OpenShift CVO semantics, z-stream patch updates within the same minor release (e.g., `4.22.10` -> `4.22.22`) are not gated on `Upgradeable`. On OCP `4.22.x` non-`IBMCloud`/`PowerVS` clusters, HUC also tolerates the known upstream HyperShift CVO migrator cleanup loop (`OCPBUGS-130965`) when `ResourceDeletesInProgress` for the two `kube-storage-version-migrator` deployments is the sole `Upgradeable=False` reason.
 - **Availability:** Core control plane conditions must be healthy: `Available=True`, `ClusterVersionAvailable=True`, and `ClusterVersionSucceeding=True`, with no active `Degraded` or `Failing` conditions.
 - **Worker Quiescence:** All NodePools must be quiescent (paused and not actively rolling out changes) before a control plane release is updated.
 

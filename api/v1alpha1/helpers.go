@@ -256,3 +256,39 @@ func GetMajorMinor(versionInput string) (int, int, error) {
 
 	return major, minor, nil
 }
+
+// IsOCP422MigratorDeletesBug detects the upstream HyperShift 4.22 bug (OCPBUGS-130965)
+// where CVO's 0000_01_cleanup.yaml deletes kube-storage-version-migrator-operator and
+// migrator deployments without omitting the 0000_50 operator deployment manifest on
+// release-4.22, leaving Upgradeable=False (Reason=ResourceDeletesInProgress) permanently.
+// It matches only when OCP is 4.22.x, Reason is strictly "ResourceDeletesInProgress"
+// (never "MultipleReasons"), and every resource listed after "; resources=" is one of
+// the two migrator deployments.
+// TODO(OCPBUGS-130965): Remove once OCP 4.22 backports OCPBUGS-130965 or 4.22 reaches EOL.
+func IsOCP422MigratorDeletesBug(versionInput, reason, message string) bool {
+	if reason != "ResourceDeletesInProgress" {
+		return false
+	}
+	major, minor, err := GetMajorMinor(versionInput)
+	if err != nil || major != 4 || minor != 22 {
+		return false
+	}
+	_, rawResources, ok := strings.Cut(strings.TrimSpace(message), "; resources=")
+	if !ok {
+		return false
+	}
+	items := strings.Split(strings.TrimSpace(rawResources), ",")
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		switch trimmed {
+		case `deployment "openshift-kube-storage-version-migrator-operator/kube-storage-version-migrator-operator"`,
+			`deployment "openshift-kube-storage-version-migrator/migrator"`:
+		default:
+			return false
+		}
+	}
+	return true
+}

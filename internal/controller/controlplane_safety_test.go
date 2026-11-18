@@ -525,3 +525,87 @@ func TestControlPlaneRolloutHardRejectionConditionsBlock(t *testing.T) {
 		})
 	}
 }
+
+func TestPatchUpgradeIgnoresUpgradeableFalseAndOCP422MigratorBugOnMinor(t *testing.T) {
+	const (
+		migratorOnlyMsg = `Cluster minor or major version upgrades are not allowed while resource deletions are in progress; resources=deployment "openshift-kube-storage-version-migrator-operator/kube-storage-version-migrator-operator",deployment "openshift-kube-storage-version-migrator/migrator"`
+		multipleMsg     = "Cluster should not be upgraded between minor or major versions for multiple reasons: IncompatibleOperatorsInstalled,ResourceDeletesInProgress\n* maximum supported OCP version for openshift-logging/cluster-logging.v6.5.3 is 4.22\n* " + migratorOnlyMsg
+	)
+
+	t.Run("patch upgrade 4.22.10 to 4.22.22 proceeds despite MultipleReasons Upgradeable=False", func(t *testing.T) {
+		hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+		hcu.Spec.TargetReleaseImage = regressionImage("4.22.22")
+		hc := regressionHC("4.22.10")
+		_ = unstructured.SetNestedField(hc.Object, "Agent", "spec", "platform", "type")
+		conditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+		conditions = conditions[:3]
+		conditions = append(conditions, map[string]interface{}{
+			"type": "ClusterVersionUpgradeable", "status": "False",
+			"reason": "MultipleReasons", "message": multipleMsg,
+		})
+		_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
+
+		np := regressionNP("workers", "")
+		_ = unstructured.SetNestedField(np.Object, regressionImage("4.22.10"), "spec", "release", "image")
+		_ = unstructured.SetNestedField(np.Object, "4.22.10", "status", "version")
+		_ = unstructured.SetNestedSlice(np.Object, []interface{}{map[string]interface{}{
+			"ocpVersion": "4.22.10", "readyNodeCount": int64(1), "unreadyNodeCount": int64(0),
+		}}, "status", "nodesInfo", "nodeVersions")
+		md := readyWorkerFixture(np, regressionImage("4.22.10"))
+
+		c := &regressionClient{objects: []client.Object{hcu, hc, np, md}}
+		addReadyCP(c, hc)
+
+		// Preflight -> PendingSchedule -> UpgradingControlPlane -> VerifyingControlPlane
+		got := reconcileRegression(t, c)
+		if got.Status.Phase != upgradev1alpha1.PhasePendingSchedule {
+			t.Fatalf("preflight held patch upgrade on Upgradeable=False: phase=%s msg=%s", got.Status.Phase, got.Status.Message)
+		}
+		got = reconcileRegression(t, c)
+		if got.Status.Phase != upgradev1alpha1.PhaseUpgradingControlPlane {
+			t.Fatalf("schedule check failed: phase=%s msg=%s", got.Status.Phase, got.Status.Message)
+		}
+		writesBeforeCP := c.writes
+		got = reconcileRegression(t, c)
+		if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane || c.writes <= writesBeforeCP {
+			t.Fatalf("patch CP rollout did not actuate: phase=%s msg=%s writes=%d", got.Status.Phase, got.Status.Message, c.writes)
+		}
+	})
+
+	t.Run("minor upgrade 4.22.22 to 4.23.0 blocks on MultipleReasons but tolerates sole OCPBUGS-130965 on non-IBM platforms", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			platform  string
+			reason    string
+			msg       string
+			wantWrite bool
+		}{
+			{"MultipleReasons held", "Agent", "MultipleReasons", multipleMsg, false},
+			{"sole OCPBUGS-130965 tolerated on Agent", "Agent", "ResourceDeletesInProgress", migratorOnlyMsg, true},
+			{"sole OCPBUGS-130965 tolerated on AWS", "AWS", "ResourceDeletesInProgress", migratorOnlyMsg, true},
+			{"IBMCloud not exempted", "IBMCloud", "ResourceDeletesInProgress", migratorOnlyMsg, false},
+			{"PowerVS not exempted", "PowerVS", "ResourceDeletesInProgress", migratorOnlyMsg, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				hcu := regressionHCU(upgradev1alpha1.PhaseUpgradingControlPlane)
+				hcu.Spec.TargetReleaseImage = regressionImage("4.23.0")
+				hc := regressionHC("4.22.22")
+				_ = unstructured.SetNestedField(hc.Object, tc.platform, "spec", "platform", "type")
+				conditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+				conditions = conditions[:3]
+				conditions = append(conditions, map[string]interface{}{
+					"type": "ClusterVersionUpgradeable", "status": "False",
+					"reason": tc.reason, "message": tc.msg,
+				})
+				_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
+
+				c := &regressionClient{objects: []client.Object{hcu, hc}}
+				addReadyCP(c, hc)
+				got := reconcileRegression(t, c)
+				if (c.writes > 0) != tc.wantWrite {
+					t.Fatalf("writes=%d wantWrite=%t (phase=%s msg=%s)", c.writes, tc.wantWrite, got.Status.Phase, got.Status.Message)
+				}
+			})
+		}
+	})
+}

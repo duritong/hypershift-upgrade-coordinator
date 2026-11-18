@@ -251,9 +251,35 @@ func TestDynamicMembershipAndBounds(t *testing.T) {
 
 func TestMinorEligibilityAndPayloadMirrors(t *testing.T) {
 	s := healthySnapshot()
+	setCondition(&s.Version.Status.Conditions, "Upgradeable", "False")
 	setCondition(&s.Operators[0].Status.Conditions, "Upgradeable", "False")
-	if r := Assess(s, s.Target, Policy{Purpose: SourceBaseline, NextRelease: release("4.20.2")}, testNow); r.State != Ready {
-		t.Fatalf("CO minor veto applied to patch: %+v", r)
+	for _, p := range []Purpose{SourceBaseline, BeforeControlPlaneRequest} {
+		if r := Assess(s, s.Target, Policy{Purpose: p, NextRelease: release("4.20.2")}, testNow); r.State != Ready {
+			t.Fatalf("CV/CO minor veto applied to patch at %s: %+v", p, r)
+		}
+	}
+
+	// OCP 4.22 OCPBUGS-130965 tolerance on minor hop (4.22.22 -> 4.23.0):
+	s422 := healthySnapshot()
+	s422.Target.Expected = release("4.22.22")
+	s422.Target.HCRelease = s422.Target.Expected.Image
+	s422.Version.Status.Desired = configv1.Release{Version: "4.22.22", Image: s422.Target.Expected.Image}
+	s422.Version.Status.History[0].Version = "4.22.22"
+	s422.Version.Status.History[0].Image = s422.Target.Expected.Image
+	s422.Operators[0].Status.Versions[0].Version = "4.22.22"
+	migratorMsg := `Cluster minor or major version upgrades are not allowed while resource deletions are in progress; resources=deployment "openshift-kube-storage-version-migrator-operator/kube-storage-version-migrator-operator",deployment "openshift-kube-storage-version-migrator/migrator"`
+	s422.Version.Status.Conditions = append(s422.Version.Status.Conditions, configv1.ClusterOperatorStatusCondition{
+		Type:    "Upgradeable",
+		Status:  configv1.ConditionFalse,
+		Reason:  "ResourceDeletesInProgress",
+		Message: migratorMsg,
+	})
+	if r := Assess(s422, s422.Target, Policy{Purpose: SourceBaseline, NextRelease: release("4.23.0")}, testNow); r.State != Ready {
+		t.Fatalf("OCPBUGS-130965 sole ResourceDeletesInProgress should be tolerated on 4.22->4.23: %+v", r)
+	}
+	s422.Version.Status.Conditions[len(s422.Version.Status.Conditions)-1].Reason = "MultipleReasons"
+	if r := Assess(s422, s422.Target, Policy{Purpose: SourceBaseline, NextRelease: release("4.23.0")}, testNow); r.State != Unhealthy {
+		t.Fatalf("MultipleReasons must still block 4.22->4.23 minor upgrade: %+v", r)
 	}
 	for _, p := range []Purpose{WorkerEntry, WorkerGuard, FinalUpgradeVerification} {
 		if r := Assess(s, s.Target, Policy{Purpose: p}, testNow); r.State != Ready {

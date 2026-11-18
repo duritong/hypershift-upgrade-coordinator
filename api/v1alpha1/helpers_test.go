@@ -287,3 +287,32 @@ func TestHostedClusterUpgradeDeepCopy(t *testing.T) {
 	listObj := list.DeepCopyObject()
 	g.Expect(listObj).NotTo(BeNil())
 }
+
+func TestIsOCP422MigratorDeletesBug(t *testing.T) {
+	const (
+		bothMsg = `Cluster minor or major version upgrades are not allowed while resource deletions are in progress; resources=deployment "openshift-kube-storage-version-migrator-operator/kube-storage-version-migrator-operator",deployment "openshift-kube-storage-version-migrator/migrator"`
+		oneMsg  = `Cluster minor or major version upgrades are not allowed while resource deletions are in progress; resources=deployment "openshift-kube-storage-version-migrator/migrator"`
+		multMsg = "Cluster should not be upgraded between minor or major versions for multiple reasons: IncompatibleOperatorsInstalled,ResourceDeletesInProgress\n* Cluster operator operator-lifecycle-manager should not be upgraded between minor or major versions\n* " + bothMsg
+	)
+	for _, tc := range []struct {
+		name    string
+		version string
+		reason  string
+		msg     string
+		want    bool
+	}{
+		{"exact 4.22 both deployments", "4.22.10", "ResourceDeletesInProgress", bothMsg, true},
+		{"exact 4.22 single migrator deployment", "4.22.22", "ResourceDeletesInProgress", oneMsg, true},
+		{"MultipleReasons with OLM veto rejected", "4.22.10", "MultipleReasons", multMsg, false},
+		{"other resource deletion rejected", "4.22.10", "ResourceDeletesInProgress", bothMsg + `,customresourcedefinition "foo.example.com"`, false},
+		{"4.21 rejected", "4.21.42", "ResourceDeletesInProgress", bothMsg, false},
+		{"4.23 rejected", "4.23.0", "ResourceDeletesInProgress", bothMsg, false},
+		{"missing resources suffix rejected", "4.22.10", "ResourceDeletesInProgress", "Cluster minor or major version upgrades are not allowed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsOCP422MigratorDeletesBug(tc.version, tc.reason, tc.msg); got != tc.want {
+				t.Fatalf("IsOCP422MigratorDeletesBug() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
