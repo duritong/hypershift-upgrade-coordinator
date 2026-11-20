@@ -62,6 +62,9 @@ func TestVirtualizationRejectsIncompleteEvidence(t *testing.T) {
 		"kv-namespace":   func(h, k *virtualizationList) { k.Items[0].Namespace = "another" },
 		"kv-unowned":     func(h, k *virtualizationList) { k.Items[0].OwnerReferences = nil },
 		"kv-wrong-owner": func(h, k *virtualizationList) { k.Items[0].OwnerReferences[0].UID = "other" },
+		"kv-wrong-owner-apiversion": func(h, k *virtualizationList) {
+			k.Items[0].OwnerReferences[0].APIVersion = "other.kubevirt.io/v1"
+		},
 		"kv-duplicate-condition": func(h, k *virtualizationList) {
 			k.Items[0].Status.Conditions = append(k.Items[0].Status.Conditions, k.Items[0].Status.Conditions[0])
 		},
@@ -339,12 +342,49 @@ func TestVirtualizationMissingHealthAndSnapshotFields(t *testing.T) {
 }
 
 func TestVirtualizationAPIVersionDiscovery(t *testing.T) {
-	for _, version := range []string{"v1", "v1beta1"} {
-		t.Run(version, func(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		hcoVersion      string
+		kvOwnerAPIVer   string
+		hcoMethods      []string
+		wantHeldBlocked bool
+	}{
+		{
+			name:            "v1beta1 served with v1beta1 ownerRef",
+			hcoVersion:      "v1beta1",
+			kvOwnerAPIVer:   "hco.kubevirt.io/v1beta1",
+			hcoMethods:      []string{},
+			wantHeldBlocked: true,
+		},
+		{
+			name:            "v1 served on 4.22 with v1beta1 storage ownerRef and held methods under spec.virtualization",
+			hcoVersion:      "v1",
+			kvOwnerAPIVer:   "hco.kubevirt.io/v1beta1",
+			hcoMethods:      []string{},
+			wantHeldBlocked: true,
+		},
+		{
+			name:            "v1 served on 4.22 with v1 ownerRef and restored LiveMigrate under spec.virtualization",
+			hcoVersion:      "v1",
+			kvOwnerAPIVer:   "hco.kubevirt.io/v1",
+			hcoMethods:      []string{"LiveMigrate"},
+			wantHeldBlocked: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h, k := virtualizationWire()
-			h.APIVersion = "hco.kubevirt.io/" + version
+			h.APIVersion = "hco.kubevirt.io/" + tc.hcoVersion
 			h.Items[0].APIVersion = h.APIVersion
-			k.Items[0].OwnerReferences[0].APIVersion = h.APIVersion
+			methods := append([]string{}, tc.hcoMethods...)
+			if tc.hcoVersion == "v1" {
+				// In hco.kubevirt.io/v1, workloadUpdateStrategy lives under spec.virtualization.
+				h.Items[0].Spec.WorkloadUpdateStrategy.Methods = nil
+				h.Items[0].Spec.Virtualization.WorkloadUpdateStrategy.Methods = &methods
+			} else {
+				h.Items[0].Spec.WorkloadUpdateStrategy.Methods = &methods
+			}
+			k.Items[0].OwnerReferences[0].APIVersion = tc.kvOwnerAPIVer
+			k.Items[0].Spec.WorkloadUpdateStrategy.Methods = &methods
 			s := healthySnapshot()
 			_, data := guestServer(t, func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -353,13 +393,13 @@ func TestVirtualizationAPIVersionDiscovery(t *testing.T) {
 				case apiPath + "clusteroperators":
 					writeJSON(w, page(s.Operators, "20", ""))
 				case hcoV1Path:
-					if version == "v1" {
+					if tc.hcoVersion == "v1" {
 						writeJSON(w, h)
 					} else {
 						http.NotFound(w, r)
 					}
 				case hcoV1Beta1Path:
-					if version == "v1beta1" {
+					if tc.hcoVersion == "v1beta1" {
 						writeJSON(w, h)
 					} else {
 						http.NotFound(w, r)
@@ -372,10 +412,18 @@ func TestVirtualizationAPIVersionDiscovery(t *testing.T) {
 			})
 			got, err := reader(t, data).Collect(context.Background())
 			if err != nil {
-				t.Fatalf("discovery of %s failed: %v", version, err)
+				t.Fatalf("discovery failed: %v", err)
 			}
-			if got.Virtualization == nil || got.Virtualization.HCO.Name != "kubevirt-hyperconverged" {
-				t.Fatalf("expected discovered virtualization for %s, got %+v", version, got.Virtualization)
+			if got.Virtualization == nil || got.Virtualization.HCO.Name != "kubevirt-hyperconverged" || !got.Virtualization.WorkloadMethodsObserved {
+				t.Fatalf("expected discovered virtualization with observed methods, got %+v", got.Virtualization)
+			}
+			pol := Policy{Purpose: WorkerEntry, RequireRestoredWorkloads: true}
+			res := Assess(got, got.Target, pol, testNow)
+			if tc.wantHeldBlocked && (res.State != Converging || res.Reason != "CNVWorkloadUpdatesStillHeld") {
+				t.Fatalf("expected CNVWorkloadUpdatesStillHeld when v1 methods are empty, got %+v", res)
+			}
+			if !tc.wantHeldBlocked && res.State != Ready {
+				t.Fatalf("expected Ready when v1 methods are restored, got %+v", res)
 			}
 		})
 	}

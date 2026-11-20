@@ -24,14 +24,19 @@ type virtualizationList struct {
 	Items           []virtualizationResource `json:"items"`
 }
 
+type workloadUpdateStrategyWire struct {
+	Methods *[]string `json:"workloadUpdateMethods"`
+}
+
 type virtualizationResource struct {
 	APIVersion        string `json:"apiVersion"`
 	Kind              string `json:"kind"`
 	metav1.ObjectMeta `json:"metadata"`
 	Spec              struct {
-		WorkloadUpdateStrategy struct {
-			Methods *[]string `json:"workloadUpdateMethods"`
-		} `json:"workloadUpdateStrategy"`
+		WorkloadUpdateStrategy workloadUpdateStrategyWire `json:"workloadUpdateStrategy"`
+		Virtualization         struct {
+			WorkloadUpdateStrategy workloadUpdateStrategyWire `json:"workloadUpdateStrategy"`
+		} `json:"virtualization"`
 	} `json:"spec"`
 	Status struct {
 		SystemHealthStatus string                    `json:"systemHealthStatus"`
@@ -50,6 +55,10 @@ func validVirtualizationIdentity(m metav1.ObjectMeta) bool {
 	return m.Name != "" && len(validation.IsDNS1123Subdomain(m.Name)) == 0 &&
 		m.Namespace != "" && len(validation.IsDNS1123Label(m.Namespace)) == 0 &&
 		m.UID != "" && m.ResourceVersion != "" && m.Generation > 0 && m.DeletionTimestamp.IsZero()
+}
+
+func isSupportedHCOAPIVersion(v string) bool {
+	return v == "hco.kubevirt.io/v1" || v == "hco.kubevirt.io/v1beta1"
 }
 
 func validVirtualizationList(l virtualizationList, api, kind string) bool {
@@ -142,7 +151,9 @@ func (r *Reader) collectVirtualization(ctx context.Context, remaining *int64) (*
 	}
 	owned := false
 	for _, owner := range kv.OwnerReferences {
-		if owner.UID == hco.UID && owner.Name == hco.Name && owner.Kind == "HyperConverged" && owner.APIVersion == hco.APIVersion {
+		// In OpenShift Virtualization 4.22 (HCO v1.18), hco.kubevirt.io/v1 is served
+		// while v1beta1 remains storage/controller APIVersion on KubeVirt ownerReferences.
+		if owner.UID == hco.UID && owner.Name == hco.Name && owner.Kind == "HyperConverged" && isSupportedHCOAPIVersion(owner.APIVersion) {
 			owned = true
 		}
 	}
@@ -177,9 +188,13 @@ func (r *Reader) collectVirtualization(ctx context.Context, remaining *int64) (*
 	if kv.Status.OutdatedWorkloads != nil && *kv.Status.OutdatedWorkloads >= 0 {
 		s.WorkloadsObserved, s.OutdatedWorkloads = true, *kv.Status.OutdatedWorkloads
 	}
-	if hco.Spec.WorkloadUpdateStrategy.Methods != nil {
+	hcoMethods := hco.Spec.WorkloadUpdateStrategy.Methods
+	if hco.APIVersion == "hco.kubevirt.io/v1" {
+		hcoMethods = hco.Spec.Virtualization.WorkloadUpdateStrategy.Methods
+	}
+	if hcoMethods != nil {
 		s.WorkloadMethodsObserved = true
-		s.HCOMethods = append([]string(nil), (*hco.Spec.WorkloadUpdateStrategy.Methods)...)
+		s.HCOMethods = append([]string(nil), (*hcoMethods)...)
 		// KubeVirt v1 explicitly defaults an empty/omitted methods list to no
 		// automated updates (and serializes empty lists with omitempty). HCO
 		// defaults to LiveMigrate instead, so its explicit empty list is required.
