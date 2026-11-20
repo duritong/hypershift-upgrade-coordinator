@@ -609,3 +609,134 @@ func TestPatchUpgradeIgnoresUpgradeableFalseAndOCP422MigratorBugOnMinor(t *testi
 		}
 	})
 }
+
+func TestOCP420LegacyControlPlaneBaseline(t *testing.T) {
+	const mcpMsg = `Cluster minor level upgrades are not allowed while resource deletions are in progress; resources=customresourcedefinition "machineconfigpools.machineconfiguration.openshift.io"`
+
+	withHCPConditions := func(hcp *unstructured.Unstructured, obsGen int64) *unstructured.Unstructured {
+		_ = unstructured.SetNestedSlice(hcp.Object, []interface{}{
+			map[string]interface{}{"type": "Available", "status": "True", "observedGeneration": obsGen},
+			map[string]interface{}{"type": "ReconciliationActive", "status": "True", "observedGeneration": obsGen},
+		}, "status", "conditions")
+		return hcp
+	}
+
+	t.Run("preflight retains the MCP veto and requests the intermediate only after it clears", func(t *testing.T) {
+		hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+		hcu.Spec.IntermediateReleaseImage = regressionImage("4.21.49")
+		hcu.Spec.TargetReleaseImage = regressionImage("4.22.22")
+		hc := regressionHC("4.20.24")
+		_ = unstructured.SetNestedField(hc.Object, "Agent", "spec", "platform", "type")
+		_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{
+			"desired": map[string]interface{}{"image": "", "version": ""},
+		}, "status", "controlPlaneVersion")
+		healthyConditions, _, _ := unstructured.NestedSlice(hc.Object, "status", "conditions")
+		conditions := healthyConditions[:3:3]
+		conditions = append(conditions, map[string]interface{}{
+			"type": "ClusterVersionUpgradeable", "status": "False",
+			"reason": "ResourceDeletesInProgress", "message": mcpMsg,
+		})
+		_ = unstructured.SetNestedSlice(hc.Object, conditions, "status", "conditions")
+
+		np := regressionNP("workers", "")
+		_ = unstructured.SetNestedField(np.Object, regressionImage("4.20.24"), "spec", "release", "image")
+		md := readyWorkerFixture(np, regressionImage("4.20.24"))
+
+		hcp := withHCPConditions(readyHCP(hc), 1)
+		cpc := readyStepCPC("4.20.24")
+		cpc.SetNamespace(WorkerControlPlaneNamespace(hc.GetNamespace(), hc.GetName()))
+
+		c := &regressionClient{objects: []client.Object{hcu, hc, np, md, hcp, cpc}}
+		r := &HostedClusterUpgradeReconciler{
+			Client:          c,
+			APIReader:       workerSource(c, hcu),
+			ReleaseResolver: fixtureReleaseResolver{},
+			GuestAccess:     legacyGuest(c, hcu, nil),
+		}
+
+		req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(hcu)}
+		got := &upgradev1alpha1.HostedClusterUpgrade{}
+		if _, err := r.Reconcile(t.Context(), req); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Get(t.Context(), req.NamespacedName, got); err != nil {
+			t.Fatal(err)
+		}
+		if c.writes != 0 || got.Status.Phase != upgradev1alpha1.PhasePreflightChecks || !strings.Contains(got.Status.Message, mcpMsg) {
+			t.Fatalf("MCP veto did not hold preflight: writes=%d phase=%s message=%s", c.writes, got.Status.Phase, got.Status.Message)
+		}
+
+		_ = unstructured.SetNestedSlice(hc.Object, healthyConditions, "status", "conditions")
+		if err := c.store(hc); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 3 {
+			if _, err := r.Reconcile(t.Context(), req); err != nil {
+				t.Fatalf("step %d reconcile failed: %v", i, err)
+			}
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(hcu), got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != upgradev1alpha1.PhaseVerifyingControlPlane {
+			t.Fatalf("phase = %s, want VerifyingControlPlane (message: %s)", got.Status.Phase, got.Status.Message)
+		}
+		updatedHC := &unstructured.Unstructured{}
+		updatedHC.SetGroupVersionKind(gvkHC)
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(hc), updatedHC); err != nil {
+			t.Fatal(err)
+		}
+		reqImg, _, _ := unstructured.NestedString(updatedHC.Object, "spec", "release", "image")
+		if reqImg != hcu.Spec.IntermediateReleaseImage {
+			t.Fatalf("HostedCluster.spec.release.image = %q, want %q", reqImg, hcu.Spec.IntermediateReleaseImage)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		version string
+		wantErr string
+	}{
+		{name: "fresh legacy baseline 4.20.24", version: "4.20.24"},
+		{name: "fresh legacy baseline 4.19.18", version: "4.19.18"},
+		{name: "stale HCP availability", version: "4.20.24", wantErr: "fresh management version status"},
+		{name: "HCP history not yet propagated", version: "4.20.24", wantErr: "controlPlaneVersion status to propagate"},
+		{name: "malformed controlPlaneVersion fails closed", version: "4.20.24", wantErr: "latest controlPlaneVersion Completed history"},
+		{name: "newer 4.20 missing management history", version: "4.20.44", wantErr: "latest controlPlaneVersion Completed history"},
+		{name: "4.21 missing management history", version: "4.21.49", wantErr: "latest controlPlaneVersion Completed history"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hcu := regressionHCU(upgradev1alpha1.PhasePreflightChecks)
+			hc := regressionHC(tc.version)
+			unstructured.RemoveNestedField(hc.Object, "status", "controlPlaneVersion")
+			hcp := withHCPConditions(readyHCP(hc), 2)
+			hcp.SetGeneration(2)
+			cpc := readyStepCPC(tc.version)
+			_ = unstructured.SetNestedField(cpc.Object, int64(2), "status", "observedGeneration")
+			switch tc.name {
+			case "stale HCP availability":
+				_ = unstructured.SetNestedSlice(hcp.Object, []interface{}{
+					map[string]interface{}{"type": "Available", "status": "True", "observedGeneration": int64(1)},
+					map[string]interface{}{"type": "ReconciliationActive", "status": "True", "observedGeneration": int64(2)},
+				}, "status", "conditions")
+			case "HCP history not yet propagated":
+				_ = unstructured.SetNestedSlice(hcp.Object, []interface{}{
+					map[string]interface{}{"state": "Partial", "version": tc.version, "image": regressionImage(tc.version)},
+				}, "status", "controlPlaneVersion", "history")
+			case "malformed controlPlaneVersion fails closed":
+				_ = unstructured.SetNestedMap(hc.Object, map[string]interface{}{
+					"observedGeneration": int64(2),
+				}, "status", "controlPlaneVersion")
+			}
+			r := &HostedClusterUpgradeReconciler{Client: &regressionClient{objects: []client.Object{hc, hcp, cpc}}}
+			err := r.verifyControlPlane(t.Context(), hcu, hc, regressionImage(tc.version))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("verification error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -281,6 +281,32 @@ func TestMinorEligibilityAndPayloadMirrors(t *testing.T) {
 	if r := Assess(s422, s422.Target, Policy{Purpose: SourceBaseline, NextRelease: release("4.23.0")}, testNow); r.State != Unhealthy {
 		t.Fatalf("MultipleReasons must still block 4.22->4.23 minor upgrade: %+v", r)
 	}
+
+	const mcpMsg = `Cluster minor level upgrades are not allowed while resource deletions are in progress; resources=customresourcedefinition "machineconfigpools.machineconfiguration.openshift.io"`
+	s422.Version.Status.Conditions[len(s422.Version.Status.Conditions)-1] = configv1.ClusterOperatorStatusCondition{
+		Type:    "Upgradeable",
+		Status:  configv1.ConditionFalse,
+		Reason:  "ResourceDeletesInProgress",
+		Message: mcpMsg,
+	}
+	for _, purpose := range []Purpose{SourceBaseline, BeforeControlPlaneRequest} {
+		if r := Assess(s422, s422.Target, Policy{Purpose: purpose, NextRelease: release("4.23.0")}, testNow); r.State != Unhealthy || r.Reason != "CVUpgradeable" {
+			t.Fatalf("%s on 4.22->4.23 must reject non-migrator MCP CRD deletion under ResourceDeletesInProgress: %+v", purpose, r)
+		}
+	}
+
+	mcp := healthySnapshot()
+	mcp.Version.Status.Conditions = append(mcp.Version.Status.Conditions, configv1.ClusterOperatorStatusCondition{
+		Type:    "Upgradeable",
+		Status:  configv1.ConditionFalse,
+		Reason:  "ResourceDeletesInProgress",
+		Message: mcpMsg,
+	})
+	for _, purpose := range []Purpose{SourceBaseline, BeforeControlPlaneRequest} {
+		if r := Assess(mcp, mcp.Target, policyFor(purpose), testNow); r.State != Unhealthy || r.Reason != "CVUpgradeable" {
+			t.Fatalf("%s must retain MCP CRD deletion veto: %+v", purpose, r)
+		}
+	}
 	for _, p := range []Purpose{WorkerEntry, WorkerGuard, FinalUpgradeVerification} {
 		if r := Assess(s, s.Target, Policy{Purpose: p}, testNow); r.State != Ready {
 			t.Fatalf("future eligibility applied at %s: %+v", p, r)

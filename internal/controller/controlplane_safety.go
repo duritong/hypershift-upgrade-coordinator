@@ -167,6 +167,83 @@ func latestRelease(hc *unstructured.Unstructured, field string) map[string]inter
 	return nil
 }
 
+// lacksControlPlaneVersionStatus accepts only absent status or a zero-valued
+// ControlPlaneVersionStatus{"desired": {"image": "", "version": ""}}. Incomplete
+// or malformed management evidence must not select the legacy proof.
+func lacksControlPlaneVersionStatus(obj *unstructured.Unstructured) bool {
+	value, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status", "controlPlaneVersion")
+	if err != nil {
+		return false
+	}
+	if !found {
+		return true
+	}
+	cpv, isObject := value.(map[string]interface{})
+	if !isObject {
+		return false
+	}
+	for k, v := range cpv {
+		if k != "desired" {
+			return false
+		}
+		desired, ok := v.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for dk, dv := range desired {
+			switch dk {
+			case "image", "version", "url":
+				if s, ok := dv.(string); !ok || s != "" {
+					return false
+				}
+			case "channels":
+				if ch, ok := dv.([]interface{}); !ok || len(ch) != 0 {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isPreControlPlaneVersionBackport(version string) bool {
+	major, _, err := upgradev1alpha1.GetMajorMinor(version)
+	return err == nil && major == 4 && !upgradev1alpha1.IsUpstreamGreater("4.20.24", version)
+}
+
+// hcpConditionsFresh verifies HostedControlPlane generation freshness via Available=True
+// and ReconciliationActive=True when neither resource has management history.
+func hcpConditionsFresh(hcp *unstructured.Unstructured) bool {
+	if hcp.GetGeneration() < 1 {
+		return false
+	}
+	conds, found, _ := unstructured.NestedSlice(hcp.Object, "status", "conditions")
+	if !found {
+		return false
+	}
+	for _, required := range []string{"Available", "ReconciliationActive"} {
+		matched := false
+		for _, item := range conds {
+			cm, ok := item.(map[string]interface{})
+			if !ok || cm["type"] != required {
+				continue
+			}
+			status, _ := cm["status"].(string)
+			obs, hasObs, _ := unstructured.NestedInt64(cm, "observedGeneration")
+			if status == "True" && hasObs && obs >= hcp.GetGeneration() {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
 // plannedControlPlaneRelease adopts only an active request on this plan, never
 // selects a hop from historical Completed state over a newer external request.
 func plannedControlPlaneRelease(hc *unstructured.Unstructured, hcu *upgradev1alpha1.HostedClusterUpgrade) (string, error) {
@@ -253,7 +330,14 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Con
 	if !samePayload(desired, image) {
 		return proof, fmt.Errorf("HostedCluster requested payload does not match expected release")
 	}
-	for _, field := range []string{"version", "controlPlaneVersion"} {
+	// Releases <= 4.20.24 shipped before the CNTRLPLANE-2914 backport (2483fff7a1).
+	// A missing HC field alone is not legacy evidence: propagation can lag HCP.
+	legacyNoCPVersion := isPreControlPlaneVersionBackport(version) && lacksControlPlaneVersionStatus(hc)
+	fields := []string{"version", "controlPlaneVersion"}
+	if legacyNoCPVersion {
+		fields = []string{"version"}
+	}
+	for _, field := range fields {
 		latest := latestRelease(hc, field)
 		completed, _ := latest["image"].(string)
 		if latest["state"] != "Completed" || latest["version"] != version || !samePayload(completed, image) {
@@ -283,7 +367,14 @@ func (r *HostedClusterUpgradeReconciler) verifyControlPlaneProof(ctx context.Con
 		return proof, fmt.Errorf("HCP management release override conflicts with expected payload")
 	}
 	observed, _, _ := unstructured.NestedInt64(hc.Object, "status", "controlPlaneVersion", "observedGeneration")
-	if hcp.GetUID() == "" || hcp.GetGeneration() < 1 || !samePayload(effective, image) || observed < hcp.GetGeneration() || !hcp.GetDeletionTimestamp().IsZero() {
+	freshManagement := observed >= hcp.GetGeneration()
+	if legacyNoCPVersion {
+		if !lacksControlPlaneVersionStatus(hcp) {
+			return proof, fmt.Errorf("waiting for HostedControlPlane controlPlaneVersion status to propagate to HostedCluster")
+		}
+		freshManagement = hcpConditionsFresh(hcp)
+	}
+	if hcp.GetUID() == "" || hcp.GetGeneration() < 1 || !samePayload(effective, image) || !freshManagement || !hcp.GetDeletionTimestamp().IsZero() {
 		return proof, fmt.Errorf("waiting for effective HCP payload and fresh management version status")
 	}
 	if err := r.aggregateControlPlaneStatus(ctx, hcu, version); err != nil {

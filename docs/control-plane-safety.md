@@ -31,7 +31,7 @@ To prevent worker nodes from becoming unsupported or disconnected during control
 
 Before modifying `HostedCluster.spec.release.image`, HUC verifies that the cluster is healthy and ready to upgrade:
 
-- **Upgradeable Condition (Minor Hops Only):** Before initiating a minor control-plane hop (e.g., `4.20` -> `4.21`), the cluster must report `ClusterVersionUpgradeable=True` on `HostedCluster` and `Upgradeable=True` on guest `ClusterVersion` and `ClusterOperators`. Matching OpenShift CVO semantics, z-stream patch updates within the same minor release (e.g., `4.22.10` -> `4.22.22`) are not gated on `Upgradeable`. On OCP `4.22.x` non-`IBMCloud`/`PowerVS` clusters, HUC also tolerates the known upstream HyperShift CVO migrator cleanup loop (`OCPBUGS-130965`) when `ResourceDeletesInProgress` for the two `kube-storage-version-migrator` deployments is the sole `Upgradeable=False` reason.
+- **Upgradeable Condition (Minor Hops Only):** Before initiating a minor control-plane hop, HUC requires `ClusterVersionUpgradeable=True` on the HostedCluster and honors guest `Upgradeable=False` vetoes. Same-minor patch updates are not gated on `Upgradeable`. The existing `OCPBUGS-130965` exception applies to the named migrator deployments on non-`IBMCloud`/`PowerVS` OCP `4.22.x` clusters. A `ResourceDeletesInProgress` veto for the `machineconfigpools.machineconfiguration.openshift.io` CRD still blocks minor hops: that message alone cannot distinguish a stuck deletion from the upstream delete/recreate bug.
 - **Availability:** Core control plane conditions must be healthy: `Available=True`, `ClusterVersionAvailable=True`, and `ClusterVersionSucceeding=True`, with no active `Degraded` or `Failing` conditions.
 - **Worker Quiescence:** All NodePools must be quiescent (paused and not actively rolling out changes) before a control plane release is updated.
 
@@ -42,7 +42,7 @@ Before modifying `HostedCluster.spec.release.image`, HUC verifies that the clust
 A control plane upgrade step is only verified as complete when all of the following criteria are satisfied:
 
 1. **History Completion:** The latest entry in both `HostedCluster.status.version.history` and guest `ClusterVersion.status.history` reports `State: Completed` with the exact expected version and payload digest.
-2. **HCP Specification & Generation:** `HostedControlPlane.spec.releaseImage` matches the expected payload, and `status.controlPlaneVersion.observedGeneration` reflects the current generation.
+2. **HCP Specification & Generation:** `HostedControlPlane.spec.releaseImage` matches the expected payload. The latest `HostedCluster.status.controlPlaneVersion.history` entry must be complete at the expected version and digest, and `controlPlaneVersion.observedGeneration` must reflect the current HCP generation. For pre-backport releases (`<= 4.20.24`) only, if both the HostedCluster and HostedControlPlane lack `controlPlaneVersion` status (absent or zero-valued), HUC instead requires `Available=True` and `ReconciliationActive=True` on the HCP at the current generation. Exact guest payload and CPC readiness checks still apply.
 3. **ControlPlaneComponent (CPC) Readiness:** Every `ControlPlaneComponent` in the hosted control plane namespace (such as `kube-apiserver`, `etcd`, and `openshift-apiserver`) reports:
    - `Available = True`
    - `RolloutComplete = True`
