@@ -109,7 +109,7 @@ func TestVirtualizationRejectsIncompleteEvidence(t *testing.T) {
 }
 
 func TestVirtualizationCollectionFailuresAndConflicts(t *testing.T) {
-	for _, mode := range []string{"absent", "empty-hco", "unsupported-api", "kv-404", "kv-403", "hco-conflict", "kv-conflict", "wrong-counter-type", "invalid-item", "byte-limit"} {
+	for _, mode := range []string{"absent", "empty-hco", "list-rv-advance", "unsupported-api", "kv-404", "kv-403", "hco-conflict", "kv-conflict", "wrong-counter-type", "invalid-item", "byte-limit"} {
 		t.Run(mode, func(t *testing.T) {
 			h, k := virtualizationWire()
 			s := healthySnapshot()
@@ -140,6 +140,9 @@ func TestVirtualizationCollectionFailuresAndConflicts(t *testing.T) {
 					if mode == "hco-conflict" && hr > 1 {
 						h.Items[0].ResourceVersion = "2"
 					}
+					if mode == "list-rv-advance" && hr > 1 {
+						h.ResourceVersion = "999"
+					}
 					if mode == "invalid-item" {
 						fmt.Fprint(w, `{"apiVersion":"hco.kubevirt.io/v1beta1","kind":"HyperConvergedList","metadata":{"resourceVersion":"1"},"items":[null]}`)
 						return
@@ -158,6 +161,9 @@ func TestVirtualizationCollectionFailuresAndConflicts(t *testing.T) {
 					if mode == "kv-conflict" && kr > 1 {
 						k.Items[0].ResourceVersion = "2"
 					}
+					if mode == "list-rv-advance" && kr > 1 {
+						k.ResourceVersion = "1000"
+					}
 					if mode == "wrong-counter-type" {
 						fmt.Fprint(w, `{"items":[{"status":{"outdatedVirtualMachineInstanceWorkloads":"unknown"}}]}`)
 						return
@@ -173,6 +179,12 @@ func TestVirtualizationCollectionFailuresAndConflicts(t *testing.T) {
 			if mode == "absent" || mode == "empty-hco" {
 				if err != nil || got.Virtualization != nil {
 					t.Fatalf("absence failed: %v", err)
+				}
+				return
+			}
+			if mode == "list-rv-advance" {
+				if err != nil || !got.complete || got.Virtualization == nil {
+					t.Fatalf("unrelated ListMeta.ResourceVersion advance caused conflict: err=%v got=%+v", err, got)
 				}
 				return
 			}

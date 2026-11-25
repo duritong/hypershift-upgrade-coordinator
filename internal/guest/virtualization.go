@@ -168,14 +168,23 @@ func (r *Reader) collectVirtualization(ctx context.Context, remaining *int64) (*
 	if _, err := r.getAbs(ctx, activeHCOPath, url.Values{"limit": {"2"}}, &after, remaining, false); err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(before, after) {
+	if !validVirtualizationList(after, activeAPIVersion, "HyperConvergedList") {
+		return bad()
+	}
+	// ListMeta.ResourceVersion is the global etcd revision (advances on unrelated
+	// Leases/Events/VMIMs); bracket the singleton Items slice (including each
+	// object's own ObjectMeta.ResourceVersion, Spec, and Status).
+	if !reflect.DeepEqual(before.Items, after.Items) {
 		return nil, &Failure{Unavailable, "CNVObservationConflict"}
 	}
 	var kvAfter virtualizationList
 	if _, err := r.getAbs(ctx, kubeVirtPath, url.Values{"limit": {"2"}}, &kvAfter, remaining, false); err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(kvList, kvAfter) {
+	if !validVirtualizationList(kvAfter, "kubevirt.io/v1", "KubeVirtList") {
+		return bad()
+	}
+	if !reflect.DeepEqual(kvList.Items, kvAfter.Items) {
 		return nil, &Failure{Unavailable, "CNVObservationConflict"}
 	}
 	s := &VirtualizationSnapshot{Present: true, Name: hco.Name, Namespace: hco.Namespace,
